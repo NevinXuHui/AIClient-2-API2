@@ -363,9 +363,9 @@ export class ProviderPoolManager {
         // 检查刷新次数是否已达上限（最大5次）
         const currentRefreshCount = config.refreshCount || 0;
         if (currentRefreshCount >= 5 && !force) {
-            this._log('warn', `Node ${providerStatus.uuid} has reached maximum refresh count (3), marking as unhealthy`);
+            this._log('warn', `Node ${providerStatus.uuid} has reached maximum refresh count (5), marking as unhealthy`);
             // 标记为不健康
-            this.markProviderUnhealthyImmediately(providerType, config, 'Maximum refresh count (3) reached');
+            this.markProviderUnhealthyImmediately(providerType, config, 'Maximum refresh count (5) reached');
             return;
         }
         
@@ -392,6 +392,11 @@ export class ProviderPoolManager {
                 force ? await serviceAdapter.forceRefreshToken() : await serviceAdapter.refreshToken() 
                 const duration = Date.now() - startTime;
                 this._log('info', `Token refresh successful for node ${providerStatus.uuid} (Duration: ${duration}ms)`);
+                
+                // 刷新成功，统一重置状态
+                config.needsRefresh = false;
+                config.refreshCount = 0;
+                config.lastRefreshTime = Date.now(); // 记录最后刷新成功时间
             } else {
                 throw new Error(`refreshToken method not implemented for ${providerType}`);
             }
@@ -1291,6 +1296,20 @@ export class ProviderPoolManager {
 
         const provider = this._findProvider(providerType, providerConfig.uuid);
         if (provider) {
+            // 防并发机制 A: 如果已经在刷新中，忽略请求
+            if (this.refreshingUuids.has(provider.uuid)) {
+                this._log('debug', `Provider ${providerConfig.uuid} is already in refresh queue, ignoring duplicate request.`);
+                return;
+            }
+
+            // 防并发机制 B: 如果 30 秒内刚刷新过，忽略请求（防止滞后的 401 错误导致重复刷新）
+            const now = Date.now();
+            const lastRefreshTime = provider.config.lastRefreshTime || 0;
+            if (now - lastRefreshTime < 30000) {
+                this._log('info', `Provider ${providerConfig.uuid} was refreshed recently (${Math.round((now - lastRefreshTime)/1000)}s ago), ignoring refresh request.`);
+                return;
+            }
+
             provider.config.needsRefresh = true;
             this._log('info', `Marked provider ${providerConfig.uuid} as needsRefresh. Enqueuing...`);
             
@@ -1330,6 +1349,10 @@ export class ProviderPoolManager {
             provider.config.lastErrorTime = new Date().toISOString();
             // 更新 lastUsed 时间，避免因 LRU 策略导致失败节点被重复选中
             provider.config.lastUsed = new Date().toISOString();
+            
+            // 只要报错，就清除刷新标记，由下次触发或健康检查决定是否需要刷新
+            provider.config.needsRefresh = false;
+            provider.config.refreshCount = 0;
 
             // 保存错误信息
             if (errorMessage) {
@@ -1368,6 +1391,8 @@ export class ProviderPoolManager {
         if (provider) {
             const wasHealthy = provider.config.isHealthy;
             provider.config.isHealthy = false;
+            provider.config.needsRefresh = false; // 报错时不健康，清除刷新标记，防止卡死
+            provider.config.refreshCount = 0;
             provider.config.errorCount = this.maxErrorCount; // Set to max to indicate definitive failure
             provider.config.lastErrorTime = new Date().toISOString();
             provider.config.lastUsed = new Date().toISOString();
@@ -1404,6 +1429,8 @@ export class ProviderPoolManager {
         const provider = this._findProvider(providerType, providerConfig.uuid);
         if (provider) {
             provider.config.isHealthy = false;
+            provider.config.needsRefresh = false; // 报错时不健康，清除刷新标记，防止卡死
+            provider.config.refreshCount = 0;
             provider.config.errorCount = this.maxErrorCount; // Set to max to indicate definitive failure
             provider.config.lastErrorTime = new Date().toISOString();
             provider.config.lastUsed = new Date().toISOString();
@@ -1445,6 +1472,7 @@ export class ProviderPoolManager {
             provider.config.errorCount = 0;
             provider.config.refreshCount = 0;
             provider.config.needsRefresh = false;
+            provider.config.lastRefreshTime = Date.now(); // 标记为健康时也视为刚刷新完成
             provider.config.lastErrorTime = null;
             provider.config.lastErrorMessage = null;
             provider.config._lastSelectionSeq = 0;
@@ -1490,6 +1518,7 @@ export class ProviderPoolManager {
         if (provider) {
             provider.config.needsRefresh = false;
             provider.config.refreshCount = 0;
+            provider.config.lastRefreshTime = Date.now(); // 显式重置时也更新刷新时间
             // 更新为可用
             provider.config.lastHealthCheckTime = new Date().toISOString();
             // 标记为健康，以便立即投入使用

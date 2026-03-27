@@ -22,6 +22,34 @@
 
 </div>
 
+## 💎 Sponsors
+
+<table width="100%">
+  <tr>
+    <td width="25%" align="center" valign="middle">
+      <a href="https://www.packyapi.com/register?aff=AIClient2API">
+        <img src="static/packycode.png" alt="PackyCode Sponsor" width="180">
+      </a>
+    </td>
+    <td width="75%" align="left" valign="middle">
+      PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more. PackyCode provides special discounts for our software users: <a href="https://www.packyapi.com/register?aff=AIClient2API">register using this link</a> and enter the <strong>AIClient2API</strong> promo code during recharge to get <strong>10% off</strong>.
+    </td>
+  </tr>
+  <tr>
+    <td width="25%" align="center" valign="middle">
+      <img src="static/wechat.png" alt="Sponsor Contact" width="150">
+    </td>
+    <td width="75%" align="left" valign="middle">
+      <strong>Become a Sponsor</strong><br>
+      If you would like to sponsor this project, please scan the WeChat QR code on the left (Please state your intent: <strong>Sponsorship</strong>).
+    </td>
+  </tr>
+</table>
+
+---
+
+## 🚀 Overview
+
 `AIClient2API` is an API proxy service that breaks through client limitations, converting free large models originally restricted to client use only (such as Gemini, Antigravity, Qwen Code, Kiro) into standard OpenAI-compatible interfaces that can be called by any application. Built on Node.js, it supports intelligent conversion between OpenAI, Claude, and Gemini protocols, enabling tools like Cherry-Studio, NextChat, and Cline to freely use advanced models such as Claude Opus 4.5, Gemini 3.0 Pro, and Qwen3 Coder Plus at scale. The project adopts a modular architecture based on strategy and adapter patterns, with built-in account pool management, intelligent polling, automatic failover, and health check mechanisms, ensuring 99.9% service availability.
 
 > [!NOTE]
@@ -438,36 +466,7 @@ Support excluding unsupported models through `notSupportedModels` configuration,
 - Some accounts cannot access specific models due to quota or permission restrictions
 - Need to assign different model access permissions to different accounts
 
-#### 3. Provider Priority Configuration
-
-Support deterministic account ordering through a per-node `priority` field in `provider_pools.json`.
-
-**Configuration** (smaller number = higher priority):
-
-```json
-{
-  "claude-kiro-oauth": [
-    {
-      "uuid": "primary-node-uuid",
-      "priority": 1,
-      "checkHealth": true
-    },
-    {
-      "uuid": "backup-node-uuid",
-      "priority": 2,
-      "checkHealth": true
-    }
-  ]
-}
-```
-
-**How It Works**:
-- The pool manager first filters healthy/available nodes by the lowest `priority` value
-- Only nodes in that highest-priority tier participate in LRU/score-based balancing
-- If the whole highest-priority tier becomes unavailable, the next priority tier is used automatically
-- If `priority` is omitted or invalid, default `100` is applied (backward compatible behavior)
-
-#### 4. Cross-Type Fallback Configuration
+#### 3. Cross-Type Fallback Configuration
 
 When all accounts under a Provider Type (e.g., `gemini-cli-oauth`) are exhausted due to 429 quota limits or marked as unhealthy, the system can automatically fallback to another compatible Provider Type (e.g., `gemini-antigravity`) instead of returning an error directly.
 
@@ -501,7 +500,7 @@ When all accounts under a Provider Type (e.g., `gemini-cli-oauth`) are exhausted
 - Fallback only occurs between protocol-compatible types (e.g., between `gemini-*`, between `claude-*`)
 - The system automatically checks if the target Provider Type supports the requested model
 
-#### 5. TLS Sidecar (Bypass 403/Cloudflare)
+#### 4. TLS Sidecar (Bypass 403/Cloudflare)
 
 For services like Grok that strictly validate TLS fingerprints (JA3/JA4), this project integrates a Sidecar proxy based on Go uTLS, which effectively solves 403 Forbidden errors by simulating browser TLS features.
 

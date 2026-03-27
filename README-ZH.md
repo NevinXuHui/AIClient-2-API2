@@ -22,6 +22,34 @@
 
 </div>
 
+## 💎 赞助商
+
+<table width="100%">
+  <tr>
+    <td width="25%" align="center" valign="middle">
+      <a href="https://www.packyapi.com/register?aff=AIClient2API">
+        <img src="static/packycode.png" alt="PackyCode Sponsor" width="180">
+      </a>
+    </td>
+    <td width="75%" align="left" valign="middle">
+      PackyCode 是一家可靠且高效的 API 中转服务商，提供 Claude Code、Codex、Gemini 等模型的中转服务。PackyCode 为本软件用户提供特别优惠：<a href="https://www.packyapi.com/register?aff=AIClient2API">通过此链接注册</a>并在充值时输入 <strong>AIClient2API</strong> 优惠码，即可享受 <strong>10% 的折扣</strong>。
+    </td>
+  </tr>
+  <tr>
+    <td width="25%" align="center" valign="middle">
+      <img src="static/wechat.png" alt="Sponsor Contact" width="150">
+    </td>
+    <td width="75%" align="left" valign="middle">
+      <strong>成为赞助商</strong><br>
+      如果您有意赞助本项目，请扫描左侧微信二维码（添加时请注明来意：<strong>赞助</strong>）。
+    </td>
+  </tr>
+</table>
+
+---
+
+## 🚀 项目概览
+
 `AIClient2API` 是一个突破客户端限制的 API 代理服务，将 Gemini、Antigravity、Qwen Code、Kiro 等原本仅限客户端内使用的免费大模型，转换为可供任何应用调用的标准 OpenAI 兼容接口。基于 Node.js 构建，支持 OpenAI、Claude、Gemini 三大协议的智能互转，让 Cherry-Studio、NextChat、Cline 等工具能够免费大量使用 Claude Opus 4.5、Gemini 3.0 Pro、Qwen3 Coder Plus 等高级模型。项目采用策略模式和适配器模式的模块化架构，内置账号池管理、智能轮询、自动故障转移和健康检查机制，确保 99.9% 的服务可用性。
 
 > [!NOTE]
@@ -437,36 +465,7 @@ curl http://localhost:3000/claude-kiro-oauth/v1/chat/completions \
 - 某些账号因配额或权限限制无法访问特定模型
 - 需要为不同账号分配不同的模型访问权限
 
-#### 3. 提供商优先级配置
-
-支持通过 `provider_pools.json` 中每个节点的 `priority` 字段实现确定的账号排序。
-
-**配置方式**（数字越小，优先级越高）：
-
-```json
-{
-  "claude-kiro-oauth": [
-    {
-      "uuid": "primary-node-uuid",
-      "priority": 1,
-      "checkHealth": true
-    },
-    {
-      "uuid": "backup-node-uuid",
-      "priority": 2,
-      "checkHealth": true
-    }
-  ]
-}
-```
-
-**工作原理**：
-- 池管理器首先按最低 `priority` 值过滤健康/可用的节点
-- 只有处于该最高优先级层级的节点才会参与基于 LRU/评分的负载均衡
-- 如果整个最高优先级层级不可用，系统将自动使用下一个优先级层级
-- 如果省略 `priority` 或其无效，将应用默认值 `100`（向后兼容行为）
-
-#### 4. 跨类型 Fallback 配置
+#### 3. 跨类型 Fallback 配置
 
 当某一 Provider Type（如 `gemini-cli-oauth`）下的所有账号都因 429 配额耗尽或被标记为 unhealthy 时，系统能够自动 fallback 到另一个兼容的 Provider Type（如 `gemini-antigravity`），而不是直接返回错误。
 
@@ -500,7 +499,7 @@ curl http://localhost:3000/claude-kiro-oauth/v1/chat/completions \
 - Fallback 只会在协议兼容的类型之间进行（如 `gemini-*` 之间、`claude-*` 之间）
 - 系统会自动检查目标 Provider Type 是否支持当前请求的模型
 
-#### 5. TLS Sidecar (Bypass 403/Cloudflare)
+#### 4. TLS Sidecar (Bypass 403/Cloudflare)
 
 针对 Grok 等对 TLS 指纹（JA3/JA4）校验严格的服务，本项目集成了基于 Go uTLS 的 Sidecar 代理，通过模拟浏览器 TLS 特征有效解决 403 Forbidden 报错。
 

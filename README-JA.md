@@ -22,6 +22,34 @@
 
 </div>
 
+## 💎 スポンサー
+
+<table width="100%">
+  <tr>
+    <td width="25%" align="center" valign="middle">
+      <a href="https://www.packyapi.com/register?aff=AIClient2API">
+        <img src="static/packycode.png" alt="PackyCode Sponsor" width="180">
+      </a>
+    </td>
+    <td width="75%" align="left" valign="middle">
+      PackyCode は信頼性が高く効率的な API リレーサービスプロバイダーであり、Claude Code、Codex、Gemini などのリレーサービス提供しています。PackyCode は当ソフトウェアユーザーに特别割引を提供しています：<a href="https://www.packyapi.com/register?aff=AIClient2API">このリンクから登録</a>し、チャージ時に <strong>AIClient2API</strong> プロモーションコードを入力すると <strong>10% オフ</strong>になります。
+    </td>
+  </tr>
+  <tr>
+    <td width="25%" align="center" valign="middle">
+      <img src="static/wechat.png" alt="Sponsor Contact" width="150">
+    </td>
+    <td width="75%" align="left" valign="middle">
+      <strong>スポンサーになる</strong><br>
+      このプロジェクトのスポンサーになりたい場合は、左側の WeChat QR コードをスキャンしてください（追加の際に来意：<strong>スポンサーシップ</strong>と明记してください）。
+    </td>
+  </tr>
+</table>
+
+---
+
+## 🚀 概要
+
 `AIClient2API` はクライアント制限を突破するAPIプロキシサービスで、Gemini、Antigravity、Qwen Code、Kiroなど、元々クライアント内でのみ使用可能な無料大規模モデルを、あらゆるアプリケーションから呼び出せる標準OpenAI互換インターフェースに変換します。Node.jsをベースに構築され、OpenAI、Claude、Geminiの3大プロトコル間のインテリジェント変換をサポートし、Cherry-Studio、NextChat、Clineなどのツールで、Claude Opus 4.5、Gemini 3.0 Pro、Qwen3 Coder Plusなどの高度なモデルを大規模に無料で使用できるようにします。プロジェクトはストラテジーパターンとアダプターパターンに基づくモジュラーアーキテクチャを採用し、アカウントプール管理、インテリジェントポーリング、自動フェイルオーバー、ヘルスチェック機構を内蔵し、99.9%のサービス可用性を保証します。
 
 > [!NOTE]
@@ -438,36 +466,7 @@ curl http://localhost:3000/claude-kiro-oauth/v1/chat/completions \
 - 一部のアカウントは割り当てまたは権限の制限により特定のモデルにアクセスできない
 - 異なるアカウントに異なるモデルアクセス権限を割り当てる必要がある
 
-#### 3. プロバイダー優先度設定
-
-`provider_pools.json` 内のノードごとの `priority` フィールドを通じて、確定的なアカウント順序をサポートします。
-
-**設定方法**（数値が小さいほど優先度が高くなります）：
-
-```json
-{
-  "claude-kiro-oauth": [
-    {
-      "uuid": "primary-node-uuid",
-      "priority": 1,
-      "checkHealth": true
-    },
-    {
-      "uuid": "backup-node-uuid",
-      "priority": 2,
-      "checkHealth": true
-    }
-  ]
-}
-```
-
-**動作原理**：
-- プールマネージャーはまず、最も低い `priority` 値によって健全/利用可能なノードをフィルタリングします
-- その最高優先度ティアのノードのみが LRU/スコアベースの負荷分散に参加します
-- 最高優先度ティア全体が利用不可になった場合、次の優先度ティアが自動的に使用されます
-- `priority` が省略されているか無効な場合、デフォルトの `100` が適用されます（後方互換性のある動作）
-
-#### 4. クロスタイプフォールバック設定
+#### 3. クロスタイプフォールバック設定
 
 あるProvider Type（例：`gemini-cli-oauth`）のすべてのアカウントが429割り当て制限により枯渇したり、unhealthyとマークされた場合、システムは直接エラーを返すのではなく、互換性のある別のProvider Type（例：`gemini-antigravity`）に自動的にフォールバックできます。
 
@@ -501,7 +500,7 @@ curl http://localhost:3000/claude-kiro-oauth/v1/chat/completions \
 - フォールバックはプロトコル互換タイプ間でのみ発生します（例：`gemini-*` 間、`claude-*` 間）
 - システムは自動的にターゲットProvider Typeがリクエストされたモデルをサポートしているか確認します
 
-#### 5. TLS Sidecar (Bypass 403/Cloudflare)
+#### 4. TLS Sidecar (Bypass 403/Cloudflare)
 
 Grok などの TLS 指紋（JA3/JA4）を厳密に検証するサービスに対して、本プロジェクトは Go uTLS ベースの Sidecar プロキシを統合しています。これにより、ブラウザの TLS 特徴をシミュレートし、403 Forbidden エラーを効果的に解決します。
 
