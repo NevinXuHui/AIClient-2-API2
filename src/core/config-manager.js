@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import { promises as pfs } from 'fs';
-import { INPUT_SYSTEM_PROMPT_FILE, MODEL_PROVIDER } from '../utils/common.js';
+import { INPUT_SYSTEM_PROMPT_FILE } from '../utils/common.js';
+import { MODEL_PROVIDER } from '../utils/constants.js';
 import logger from '../utils/logger.js';
 
 export let CONFIG = {}; // Make CONFIG exportable
@@ -76,6 +77,12 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         LOGIN_MIN_INTERVAL: 5000, // 两次尝试之间的最小间隔（毫秒），默认1秒
         PROVIDER_POOLS_FILE_PATH: null, // 新增号池配置文件路径
         MAX_ERROR_COUNT: 10, // 提供商最大错误次数
+        SYSTEM_PROMPT_REPLACEMENTS: [], // 系统提示词内容替换规则，例如: [{"old": "AI", "new": "Bot"}, {"old": "OpenAI", "new": "Gemini"}]
+        SCHEDULED_HEALTH_CHECK: {
+            enabled: false,
+            interval: 600000,
+            startupRun: false
+        },
         providerFallbackChain: {}, // 跨类型 Fallback 链配置
         LOG_ENABLED: true,
         LOG_OUTPUT_MODE: "all",
@@ -126,6 +133,8 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         { flag: '--login-max-attempts',   configKey: 'LOGIN_MAX_ATTEMPTS',     type: 'int' },
         { flag: '--login-lockout-duration', configKey: 'LOGIN_LOCKOUT_DURATION', type: 'int' },
         { flag: '--login-min-interval',   configKey: 'LOGIN_MIN_INTERVAL',     type: 'int' },
+        { flag: '--scheduled-health-check-enabled', configKey: 'SCHEDULE_HEALTH_CHECK_ENABLED', type: 'bool' },
+        { flag: '--scheduled-health-check-interval', configKey: 'SCHEDULE_HEALTH_CHECK_INTERVAL', type: 'int' },
     ];
 
     // Parse command-line arguments using definitions
@@ -158,6 +167,14 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
                 }
                 break;
         }
+    }
+
+    // 合并定时健康检查的 CLI 配置
+    if (currentConfig.SCHEDULE_HEALTH_CHECK_ENABLED !== undefined) {
+        currentConfig.SCHEDULED_HEALTH_CHECK.enabled = currentConfig.SCHEDULE_HEALTH_CHECK_ENABLED;
+    }
+    if (currentConfig.SCHEDULE_HEALTH_CHECK_INTERVAL !== undefined) {
+        currentConfig.SCHEDULED_HEALTH_CHECK.interval = currentConfig.SCHEDULE_HEALTH_CHECK_INTERVAL;
     }
 
     normalizeConfiguredProviders(currentConfig);

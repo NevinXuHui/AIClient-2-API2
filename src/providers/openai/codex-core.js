@@ -14,7 +14,7 @@ import { getProviderModels } from '../provider-models.js';
 const baseModels = getProviderModels(MODEL_PROVIDER.CODEX_API);
 const fastModels = baseModels.map(m => `${m}-fast`);
 const CODEX_MODELS = [...new Set([...baseModels, ...fastModels])];
-const CODEX_VERSION = '0.111.0';
+const CODEX_VERSION = '0.118.0';
 
 /**
  * Codex API 服务类
@@ -40,7 +40,7 @@ export class CodexApiService {
     }
 
     _applySidecar(axiosConfig) {
-        return configureTLSSidecar(axiosConfig, this.config, MODEL_PROVIDER.CODEX_API, this.baseUrl);
+        return configureTLSSidecar(axiosConfig, this.config, this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API, this.baseUrl);
     }
 
     /**
@@ -148,7 +148,7 @@ export class CodexApiService {
         const poolManager = getProviderPoolManager();
         if (poolManager && this.uuid) {
             logger.info(`[Codex] Token is near expiry, marking credential ${this.uuid} for background refresh`);
-            poolManager.markProviderNeedRefresh(MODEL_PROVIDER.CODEX_API, {
+            poolManager.markProviderNeedRefresh(this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API, {
                 uuid: this.uuid
             });
         }
@@ -195,7 +195,7 @@ export class CodexApiService {
             };
 
             // 配置代理
-            const proxyConfig = getProxyConfigForProvider(this.config, 'openai-codex-oauth');
+            const proxyConfig = getProxyConfigForProvider(this.config, this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API);
             if (proxyConfig) {
                 config.httpAgent = proxyConfig.httpAgent;
                 config.httpsAgent = proxyConfig.httpsAgent;
@@ -272,7 +272,7 @@ export class CodexApiService {
             };
 
             // 配置代理
-            const proxyConfig = getProxyConfigForProvider(this.config, 'openai-codex-oauth');
+            const proxyConfig = getProxyConfigForProvider(this.config, this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API);
             if (proxyConfig) {
                 config.httpAgent = proxyConfig.httpAgent;
                 config.httpsAgent = proxyConfig.httpsAgent;
@@ -319,8 +319,8 @@ export class CodexApiService {
             'authorization': `Bearer ${this.accessToken}`,
             'chatgpt-account-id': this.accountId,
             'content-type': 'application/json',
-            'user-agent': `codex_cli_rs/${CODEX_VERSION} (Windows 10.0.26100; x86_64) WindowsTerminal`,
-            'originator': 'codex_cli_rs',
+            'user-agent': `codex-tui/${CODEX_VERSION} (Windows 10.0.26100; x86_64) WindowsTerminal (codex-tui; ${CODEX_VERSION})`,
+            'originator': 'codex-tui',
             'host': 'chatgpt.com',
             'Connection': 'Keep-Alive'
         };
@@ -364,6 +364,17 @@ export class CodexApiService {
         // 【关键修复】确保传给上游的模型名称不带 -fast 后缀
         // 即使 originalRequestBody 中已经带了 model，这里也必须覆盖
         cleanedBody.model = upstreamModel;
+
+        // 为所有 Codex 模型增加默认工具
+        if (!cleanedBody.tools) {
+            cleanedBody.tools = [];
+        }
+        if (Array.isArray(cleanedBody.tools)) {
+            const hasWebSearch = cleanedBody.tools.some(t => t.type === 'web_search');
+            if (!hasWebSearch) {
+                cleanedBody.tools.push({ type: 'web_search' });
+            }
+        }
 
         if (isFastModel) {
             logger.info(`[Codex] Detected -fast model: ${normalizedModel} -> ${upstreamModel}, service_tier: ${cleanedBody.service_tier || defaultServiceTier}`);
@@ -454,7 +465,7 @@ export class CodexApiService {
             // 刷新成功，重置 PoolManager 中的刷新状态并标记为健康
             const poolManager = getProviderPoolManager();
             if (poolManager && this.uuid) {
-                poolManager.resetProviderRefreshStatus(MODEL_PROVIDER.CODEX_API, this.uuid);
+                poolManager.resetProviderRefreshStatus(this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API, this.uuid);
             }
             logger.info('[Codex] Token refreshed successfully');
         } catch (error) {
@@ -596,9 +607,13 @@ export class CodexApiService {
     parseNonStreamResponse(data) {
         // 确保 data 是字符串
         const responseText = typeof data === 'string' ? data : String(data);
-        
-        // 从 SSE 流中提取 response.completed 事件
+
+        // 从 SSE 流中提取所有事件，累积 output
         const lines = responseText.split('\n');
+        const outputItems = new Map(); // id -> output item
+        const textDeltas = new Map(); // item_id -> accumulated text
+        let completedEvent = null;
+
         for (const line of lines) {
             if (line.startsWith('data: ')) {
                 const jsonData = line.slice(6).trim();
@@ -607,8 +622,26 @@ export class CodexApiService {
                 }
                 try {
                     const parsed = JSON.parse(jsonData);
-                    if (parsed.type === 'response.completed') {
-                        return parsed;
+                    switch (parsed.type) {
+                        case 'response.output_item.added':
+                            if (parsed.item) {
+                                outputItems.set(parsed.item.id, parsed.item);
+                            }
+                            break;
+                        case 'response.output_text.delta':
+                            if (parsed.item_id && parsed.delta) {
+                                const existing = textDeltas.get(parsed.item_id) || '';
+                                textDeltas.set(parsed.item_id, existing + parsed.delta);
+                            }
+                            break;
+                        case 'response.output_text.done':
+                            if (parsed.item_id && parsed.text) {
+                                textDeltas.set(parsed.item_id, parsed.text);
+                            }
+                            break;
+                        case 'response.completed':
+                            completedEvent = parsed;
+                            break;
                     }
                 } catch (e) {
                     // 继续解析下一行
@@ -616,10 +649,47 @@ export class CodexApiService {
                 }
             }
         }
-        
-        // 如果没有找到 response.completed，抛出错误
-        logger.error('[Codex] No completed response found in Codex response');
-        throw new Error('stream error: stream disconnected before completion: stream closed before response.completed');
+
+        if (!completedEvent) {
+            logger.error('[Codex] No completed response found in Codex response');
+            throw new Error('stream error: stream disconnected before completion: stream closed before response.completed');
+        }
+
+        // 用累积的 delta 文本填充 output items 中缺失的内容
+        if (completedEvent.response && textDeltas.size > 0) {
+            const output = completedEvent.response.output || [];
+            for (const item of output) {
+                if (item.type === 'message' && item.role === 'assistant') {
+                    const accumulatedText = textDeltas.get(item.id);
+                    if (accumulatedText !== undefined) {
+                        // content 为空或不含 output_text，直接注入
+                        if (!item.content || item.content.length === 0) {
+                            item.content = [{ type: 'output_text', text: accumulatedText }];
+                        } else {
+                            item.content = item.content.map(c => {
+                                if (c.type === 'output_text' && !c.text) {
+                                    return { ...c, text: accumulatedText };
+                                }
+                                return c;
+                            });
+                        }
+                    }
+                }
+            }
+            // 如果 output 完全为空，从累积事件重建
+            if (output.length === 0 && outputItems.size > 0) {
+                for (const [id, item] of outputItems) {
+                    const accumulatedText = textDeltas.get(id);
+                    if (accumulatedText !== undefined && item.type === 'message') {
+                        item.content = [{ type: 'output_text', text: accumulatedText }];
+                    }
+                    output.push(item);
+                }
+                completedEvent.response.output = output;
+            }
+        }
+
+        return completedEvent;
     }
 
     /**
@@ -674,7 +744,7 @@ export class CodexApiService {
         try {
             const url = 'https://chatgpt.com/backend-api/wham/usage';
             const headers = {
-                'user-agent': `codex_cli_rs/${CODEX_VERSION} (Windows 10.0.26100; x86_64) WindowsTerminal`,
+                'user-agent': `codex-tui/${CODEX_VERSION} (Windows 10.0.26100; x86_64) WindowsTerminal (codex-tui; ${CODEX_VERSION})`,
                 'authorization': `Bearer ${this.accessToken}`,
                 'chatgpt-account-id': this.accountId,
                 'accept': '*/*',
@@ -688,7 +758,7 @@ export class CodexApiService {
             };
 
             // 配置代理
-            const proxyConfig = getProxyConfigForProvider(this.config, 'openai-codex-oauth');
+            const proxyConfig = getProxyConfigForProvider(this.config, this.config.MODEL_PROVIDER || MODEL_PROVIDER.CODEX_API);
             if (proxyConfig) {
                 config.httpAgent = proxyConfig.httpAgent;
                 config.httpsAgent = proxyConfig.httpsAgent;

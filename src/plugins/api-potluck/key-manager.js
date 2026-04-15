@@ -47,6 +47,122 @@ let isWriting = false;
 let persistTimer = null;
 let currentPersistInterval = DEFAULT_CONFIG.persistInterval;
 
+function createUsageBucket() {
+    return {
+        requestCount: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        cachedTokens: 0
+    };
+}
+
+function toNumber(value) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : 0;
+}
+
+function normalizeUsageBucket(bucket) {
+    if (typeof bucket === 'number') {
+        return {
+            ...createUsageBucket(),
+            requestCount: bucket
+        };
+    }
+
+    return {
+        ...createUsageBucket(),
+        ...(bucket || {}),
+        requestCount: toNumber(bucket?.requestCount),
+        promptTokens: toNumber(bucket?.promptTokens),
+        completionTokens: toNumber(bucket?.completionTokens),
+        totalTokens: toNumber(bucket?.totalTokens),
+        cachedTokens: toNumber(bucket?.cachedTokens)
+    };
+}
+
+function normalizeUsageMap(map = {}) {
+    const normalized = {};
+    for (const [name, usage] of Object.entries(map || {})) {
+        normalized[name] = normalizeUsageBucket(usage);
+    }
+    return normalized;
+}
+
+function normalizeUsageHistoryDay(day = {}) {
+    return {
+        summary: normalizeUsageBucket(day.summary || {
+            requestCount: day.requestCount
+        }),
+        providers: normalizeUsageMap(day.providers),
+        models: normalizeUsageMap(day.models)
+    };
+}
+
+function normalizeKeyData(keyData = {}) {
+    const normalized = {
+        ...keyData,
+        todayUsage: toNumber(keyData.todayUsage),
+        totalUsage: toNumber(keyData.totalUsage),
+        todayPromptTokens: toNumber(keyData.todayPromptTokens),
+        todayCompletionTokens: toNumber(keyData.todayCompletionTokens),
+        todayTotalTokens: toNumber(keyData.todayTotalTokens),
+        todayCachedTokens: toNumber(keyData.todayCachedTokens),
+        totalPromptTokens: toNumber(keyData.totalPromptTokens),
+        totalCompletionTokens: toNumber(keyData.totalCompletionTokens),
+        totalTokens: toNumber(keyData.totalTokens),
+        totalCachedTokens: toNumber(keyData.totalCachedTokens),
+        usageHistory: {}
+    };
+
+    for (const [date, day] of Object.entries(keyData.usageHistory || {})) {
+        normalized.usageHistory[date] = normalizeUsageHistoryDay(day);
+    }
+
+    return normalized;
+}
+
+function normalizeStore(store = {}) {
+    const normalized = { keys: {} };
+    for (const [keyId, keyData] of Object.entries(store.keys || {})) {
+        normalized.keys[keyId] = normalizeKeyData(keyData);
+    }
+    return normalized;
+}
+
+function addUsage(target, usage = {}) {
+    target.requestCount += toNumber(usage.requestCount);
+    target.promptTokens += toNumber(usage.promptTokens);
+    target.completionTokens += toNumber(usage.completionTokens);
+    target.totalTokens += toNumber(usage.totalTokens);
+    target.cachedTokens += toNumber(usage.cachedTokens);
+}
+
+function resetUsageBucketTokens(bucket) {
+    if (!bucket || typeof bucket !== 'object') return;
+    bucket.promptTokens = 0;
+    bucket.completionTokens = 0;
+    bucket.totalTokens = 0;
+    bucket.cachedTokens = 0;
+}
+
+function resetUsageHistoryTokens(usageHistory) {
+    if (!usageHistory || typeof usageHistory !== 'object') return;
+
+    for (const day of Object.values(usageHistory)) {
+        if (!day || typeof day !== 'object') continue;
+        resetUsageBucketTokens(day.summary);
+
+        for (const usage of Object.values(day.providers || {})) {
+            resetUsageBucketTokens(usage);
+        }
+
+        for (const usage of Object.values(day.models || {})) {
+            resetUsageBucketTokens(usage);
+        }
+    }
+}
+
 /**
  * 初始化：从文件加载数据到内存
  */
@@ -55,7 +171,7 @@ function ensureLoaded() {
     try {
         if (existsSync(KEYS_STORE_FILE)) {
             const content = readFileSync(KEYS_STORE_FILE, 'utf8');
-            keyStore = JSON.parse(content);
+            keyStore = normalizeStore(JSON.parse(content));
         } else {
             keyStore = { keys: {} };
             syncWriteToFile();
@@ -86,7 +202,7 @@ function syncWriteToFile() {
     try {
         const dir = path.dirname(KEYS_STORE_FILE);
         if (!existsSync(dir)) {
-            require('fs').mkdirSync(dir, { recursive: true });
+            mkdirSync(dir, { recursive: true });
         }
         writeFileSync(KEYS_STORE_FILE, JSON.stringify(keyStore, null, 2), 'utf8');
     } catch (error) {
@@ -159,6 +275,10 @@ function checkAndResetDailyCount(keyData) {
     const today = getTodayDateString();
     if (keyData.lastResetDate !== today) {
         keyData.todayUsage = 0;
+        keyData.todayPromptTokens = 0;
+        keyData.todayCompletionTokens = 0;
+        keyData.todayTotalTokens = 0;
+        keyData.todayCachedTokens = 0;
         keyData.lastResetDate = today;
     }
     return keyData;
@@ -166,7 +286,6 @@ function checkAndResetDailyCount(keyData) {
 
 /**
  * 创建新的 API Key
-
  * @param {string} name - Key 名称
  * @param {number} [dailyLimit] - 每日限额，不传则使用配置的默认值
  */
@@ -186,6 +305,14 @@ export async function createKey(name = '', dailyLimit = null) {
         dailyLimit: actualDailyLimit,
         todayUsage: 0,
         totalUsage: 0,
+        todayPromptTokens: 0,
+        todayCompletionTokens: 0,
+        todayTotalTokens: 0,
+        todayCachedTokens: 0,
+        totalPromptTokens: 0,
+        totalCompletionTokens: 0,
+        totalTokens: 0,
+        totalCachedTokens: 0,
         lastResetDate: today,
         lastUsedAt: null,
         enabled: true
@@ -256,9 +383,68 @@ export async function resetKeyUsage(keyId) {
     ensureLoaded();
     if (!keyStore.keys[keyId]) return null;
     keyStore.keys[keyId].todayUsage = 0;
+    keyStore.keys[keyId].todayPromptTokens = 0;
+    keyStore.keys[keyId].todayCompletionTokens = 0;
+    keyStore.keys[keyId].todayTotalTokens = 0;
+    keyStore.keys[keyId].todayCachedTokens = 0;
     keyStore.keys[keyId].lastResetDate = getTodayDateString();
+    if (!keyStore.keys[keyId].usageHistory) keyStore.keys[keyId].usageHistory = {};
+    keyStore.keys[keyId].usageHistory[getTodayDateString()] = normalizeUsageHistoryDay();
     markDirty();
     return keyStore.keys[keyId];
+}
+
+/**
+ * 重置单个 Key 的 Token 统计（保留调用次数）
+ */
+export async function resetKeyTokenStats(keyId) {
+    ensureLoaded();
+    const keyData = keyStore.keys[keyId];
+    if (!keyData) return null;
+
+    keyData.todayPromptTokens = 0;
+    keyData.todayCompletionTokens = 0;
+    keyData.todayTotalTokens = 0;
+    keyData.todayCachedTokens = 0;
+    keyData.totalPromptTokens = 0;
+    keyData.totalCompletionTokens = 0;
+    keyData.totalTokens = 0;
+    keyData.totalCachedTokens = 0;
+    resetUsageHistoryTokens(keyData.usageHistory);
+
+    markDirty();
+    await persistIfDirty();
+    logger.info(`[API Potluck] Reset token stats for key: ${keyId.substring(0, 12)}...`);
+    return keyData;
+}
+
+/**
+ * 重置所有 Key 的 Token 统计（保留调用次数）
+ */
+export async function resetAllTokenStats() {
+    ensureLoaded();
+    let updated = 0;
+
+    for (const keyData of Object.values(keyStore.keys)) {
+        keyData.todayPromptTokens = 0;
+        keyData.todayCompletionTokens = 0;
+        keyData.todayTotalTokens = 0;
+        keyData.todayCachedTokens = 0;
+        keyData.totalPromptTokens = 0;
+        keyData.totalCompletionTokens = 0;
+        keyData.totalTokens = 0;
+        keyData.totalCachedTokens = 0;
+        resetUsageHistoryTokens(keyData.usageHistory);
+        updated++;
+    }
+
+    if (updated > 0) {
+        markDirty();
+        await persistIfDirty();
+    }
+
+    logger.info(`[API Potluck] Reset token stats for all keys: ${updated}`);
+    return { total: Object.keys(keyStore.keys).length, updated };
 }
 
 /**
@@ -348,8 +534,9 @@ export async function validateKey(apiKey) {
  * @param {string} apiKey - API Key
  * @param {string} provider - 使用的提供商
  * @param {string} model - 使用的模型
+ * @param {{promptTokens?: number, completionTokens?: number, totalTokens?: number, cachedTokens?: number}} usage - token 用量
  */
-export async function incrementUsage(apiKey, provider = 'unknown', model = 'unknown') {
+export async function incrementUsage(apiKey, provider = 'unknown', model = 'unknown', usage = {}) {
     ensureLoaded();
     const keyData = keyStore.keys[apiKey];
     if (!keyData) return null;
@@ -365,13 +552,21 @@ export async function incrementUsage(apiKey, provider = 'unknown', model = 'unkn
     }
     
     keyData.totalUsage += 1;
+    keyData.todayPromptTokens += toNumber(usage.promptTokens);
+    keyData.todayCompletionTokens += toNumber(usage.completionTokens);
+    keyData.todayTotalTokens += toNumber(usage.totalTokens);
+    keyData.todayCachedTokens += toNumber(usage.cachedTokens);
+    keyData.totalPromptTokens += toNumber(usage.promptTokens);
+    keyData.totalCompletionTokens += toNumber(usage.completionTokens);
+    keyData.totalTokens += toNumber(usage.totalTokens);
+    keyData.totalCachedTokens += toNumber(usage.cachedTokens);
     keyData.lastUsedAt = new Date().toISOString();
 
     // 记录个人按天统计 (每个 Key 独立)
     const today = getTodayDateString();
     if (!keyData.usageHistory) keyData.usageHistory = {};
     if (!keyData.usageHistory[today]) {
-        keyData.usageHistory[today] = { providers: {}, models: {} };
+        keyData.usageHistory[today] = normalizeUsageHistoryDay();
     }
     
     // 确保 provider 和 model 是字符串
@@ -379,13 +574,16 @@ export async function incrementUsage(apiKey, provider = 'unknown', model = 'unkn
     const mName = String(model || 'unknown');
     
     const userHistory = keyData.usageHistory[today];
-    userHistory.providers[pName] = (userHistory.providers[pName] || 0) + 1;
-    userHistory.models[mName] = (userHistory.models[mName] || 0) + 1;
+    userHistory.providers[pName] = normalizeUsageBucket(userHistory.providers[pName]);
+    userHistory.models[mName] = normalizeUsageBucket(userHistory.models[mName]);
+    addUsage(userHistory.summary, { requestCount: 1, ...usage });
+    addUsage(userHistory.providers[pName], { requestCount: 1, ...usage });
+    addUsage(userHistory.models[mName], { requestCount: 1, ...usage });
 
-    // 清理该 Key 的过期历史 (保留 7 天)
+    // 清理该 Key 的过期历史 (保留 100 天以支持 3 个月日历)
     const userDates = Object.keys(keyData.usageHistory).sort();
-    if (userDates.length > 7) {
-        const dropDates = userDates.slice(0, userDates.length - 7);
+    if (userDates.length > 100) {
+        const dropDates = userDates.slice(0, userDates.length - 100);
         dropDates.forEach(d => delete keyData.usageHistory[d]);
     }
 
@@ -404,6 +602,8 @@ export async function getStats() {
     ensureLoaded();
     const keys = Object.values(keyStore.keys);
     let enabledKeys = 0, todayTotalUsage = 0, totalUsage = 0;
+    let todayPromptTokens = 0, todayCompletionTokens = 0, todayTotalTokens = 0, todayCachedTokens = 0;
+    let totalPromptTokens = 0, totalCompletionTokens = 0, totalTokens = 0, totalCachedTokens = 0;
     const aggregatedHistory = {};
 
     for (const key of keys) {
@@ -411,25 +611,36 @@ export async function getStats() {
         if (key.enabled) enabledKeys++;
         todayTotalUsage += key.todayUsage;
         totalUsage += key.totalUsage;
+        todayPromptTokens += key.todayPromptTokens || 0;
+        todayCompletionTokens += key.todayCompletionTokens || 0;
+        todayTotalTokens += key.todayTotalTokens || 0;
+        todayCachedTokens += key.todayCachedTokens || 0;
+        totalPromptTokens += key.totalPromptTokens || 0;
+        totalCompletionTokens += key.totalCompletionTokens || 0;
+        totalTokens += key.totalTokens || 0;
+        totalCachedTokens += key.totalCachedTokens || 0;
 
         // 汇总每个 Key 的历史数据
         if (key.usageHistory) {
             Object.entries(key.usageHistory).forEach(([date, history]) => {
                 if (!aggregatedHistory[date]) {
-                    aggregatedHistory[date] = { providers: {}, models: {} };
+                    aggregatedHistory[date] = normalizeUsageHistoryDay();
                 }
+                addUsage(aggregatedHistory[date].summary, history.summary);
                 
                 // 汇总提供商
                 if (history.providers) {
-                    Object.entries(history.providers).forEach(([p, count]) => {
-                        aggregatedHistory[date].providers[p] = (aggregatedHistory[date].providers[p] || 0) + count;
+                    Object.entries(history.providers).forEach(([p, usage]) => {
+                        aggregatedHistory[date].providers[p] = normalizeUsageBucket(aggregatedHistory[date].providers[p]);
+                        addUsage(aggregatedHistory[date].providers[p], usage);
                     });
                 }
                 
                 // 汇总模型
                 if (history.models) {
-                    Object.entries(history.models).forEach(([m, count]) => {
-                        aggregatedHistory[date].models[m] = (aggregatedHistory[date].models[m] || 0) + count;
+                    Object.entries(history.models).forEach(([m, usage]) => {
+                        aggregatedHistory[date].models[m] = normalizeUsageBucket(aggregatedHistory[date].models[m]);
+                        addUsage(aggregatedHistory[date].models[m], usage);
                     });
                 }
             });
@@ -442,6 +653,14 @@ export async function getStats() {
         disabledKeys: keys.length - enabledKeys,
         todayTotalUsage,
         totalUsage,
+        todayPromptTokens,
+        todayCompletionTokens,
+        todayTotalTokens,
+        todayCachedTokens,
+        totalPromptTokens,
+        totalCompletionTokens,
+        totalTokens,
+        totalCachedTokens,
         usageHistory: aggregatedHistory
     };
 }
@@ -449,7 +668,7 @@ export async function getStats() {
 
 /**
  * 批量更新所有 Key 的每日限额
- * @param {number} newLimit - 新的每日限额
+ * @param {number} newLimit - 新s的每日限额
  * @returns {Promise<{total: number, updated: number}>}
  */
 export async function applyDailyLimitToAllKeys(newLimit) {

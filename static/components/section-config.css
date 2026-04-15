@@ -7,11 +7,6 @@
     border: 1px solid var(--border-color);
 }
 
-.config-form {
-    max-width: 800px;
-    margin: 0 auto;
-}
-
 .form-group {
     margin-bottom: 1.5rem;
 }
@@ -47,6 +42,33 @@
 textarea.form-control {
     resize: vertical;
     font-family: inherit;
+}
+
+/* 带快捷选择的输入框 */
+.input-with-quick-select {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.input-with-quick-select .form-control {
+    width: 100%;
+}
+
+.quick-select-btns {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.quick-select-btns .btn {
+    padding: 0.25rem 0.75rem;
+    font-size: 0.75rem;
+}
+
+.config-form {
+    max-width: 800px;
+    margin: 0 auto;
 }
 
 /* 密码输入框样式 */
@@ -151,7 +173,7 @@ textarea.form-control {
     width: 18px;
     left: 3px;
     bottom: 2px;
-    background-color: white;
+    background-color: var(--bg-primary, white);
     transition: var(--transition);
     border-radius: 50%;
     box-shadow: 0 1px 3px var(--neutral-shadow-30);
@@ -278,6 +300,43 @@ input:checked + .toggle-slider:before {
     box-shadow: 0 4px 12px var(--primary-40);
 }
 
+/* 系统提示词替换规则样式 */
+.replacements-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.replacement-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 0.75rem;
+    align-items: center;
+    background: var(--bg-tertiary);
+    padding: 0.75rem;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-color);
+}
+
+.replacement-row .form-control {
+    margin-bottom: 0;
+}
+
+.remove-replacement-btn {
+    color: var(--danger-color);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.5rem;
+    transition: var(--transition);
+}
+
+.remove-replacement-btn:hover {
+    color: #dc2626;
+    transform: scale(1.1);
+}
+
 /* 提供商标签选择器样式 */
 .provider-tags {
     display: flex;
@@ -338,6 +397,47 @@ input:checked + .toggle-slider:before {
 
 .provider-tag span {
     white-space: nowrap;
+}
+
+/* 置顶图标样式 */
+.tag-pin-icon {
+    margin-left: 6px;
+    padding: 2px;
+    opacity: 0.3;
+    transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.provider-tag:hover .tag-pin-icon {
+    opacity: 0.6;
+}
+
+.tag-pin-icon:hover {
+    opacity: 1 !important;
+    color: #ffc107;
+    transform: scale(1.2);
+}
+
+/* 置顶状态标签样式 */
+.provider-tag.pinned {
+    position: relative;
+    border-color: #ffc107;
+    box-shadow: 0 0 10px rgba(255, 193, 7, 0.3);
+}
+
+.provider-tag.pinned .tag-pin-icon {
+    opacity: 1;
+    color: #ffc107;
+}
+
+.provider-tag.pinned i.fa-thumbtack {
+    transform: rotate(0deg);
+}
+
+.provider-tag:not(.pinned) .tag-pin-icon i {
+    transform: rotate(45deg);
 }
 
 

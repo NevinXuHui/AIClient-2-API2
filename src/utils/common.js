@@ -1,3 +1,4 @@
+export { MODEL_PROTOCOL_PREFIX, MODEL_PROVIDER } from './constants.js';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as http from 'http'; // Add http for IncomingMessage and ServerResponse types
@@ -6,6 +7,7 @@ import logger from './logger.js';
 import { convertData, getOpenAIStreamChunkStop } from '../convert/convert.js';
 import { ProviderStrategyFactory } from './provider-strategies.js';
 import { getPluginManager } from '../core/plugin-manager.js';
+import { MODEL_PROTOCOL_PREFIX, MODEL_PROVIDER } from './constants.js';
 
 // ==================== 网络错误处理 ====================
 
@@ -49,31 +51,26 @@ export const API_ACTIONS = {
     STREAM_GENERATE_CONTENT: 'streamGenerateContent',
 };
 
-export const MODEL_PROTOCOL_PREFIX = {
-    // Model provider constants
-    GEMINI: 'gemini',
-    OPENAI: 'openai',
-    OPENAI_RESPONSES: 'openaiResponses',
-    CLAUDE: 'claude',
-    CODEX: 'codex',
-    FORWARD: 'forward',
-    GROK: 'grok',
-}
+import {
+    usesManagedModelList,
+    getConfiguredSupportedModels
+} from '../providers/provider-models.js';
 
-export const MODEL_PROVIDER = {
-    // Model provider constants
-    GEMINI_CLI: 'gemini-cli-oauth',
-    ANTIGRAVITY: 'gemini-antigravity',
-    OPENAI_CUSTOM: 'openai-custom',
-    OPENAI_CUSTOM_RESPONSES: 'openaiResponses-custom',
-    CLAUDE_CUSTOM: 'claude-custom',
-    KIRO_API: 'claude-kiro-oauth',
-    QWEN_API: 'openai-qwen-oauth',
-    IFLOW_API: 'openai-iflow',
-    CODEX_API: 'openai-codex-oauth',
-    FORWARD_API: 'forward-api',
-    GROK_CUSTOM: 'grok-custom',
-    AUTO: 'auto',
+/**
+ * 获取指定提供商类型下，所有节点配置的已选模型列表（去重聚合）
+ * @param {object} providerPoolManager - 提供商池管理器
+ * @param {string} providerType - 提供商类型
+ * @returns {string[]} 聚合后的模型 ID 列表
+ */
+function getConfiguredSupportedModelsFromPool(providerPoolManager, providerType) {
+    if (!providerPoolManager?.providerStatus?.[providerType]) {
+        return [];
+    }
+
+    return [...new Set(
+        providerPoolManager.providerStatus[providerType]
+            .flatMap(providerStatus => getConfiguredSupportedModels(providerType, providerStatus.config))
+    )].sort((a, b) => a.localeCompare(b));
 }
 
 /**
@@ -278,11 +275,11 @@ export function isAuthorized(req, requestUrl, REQUIRED_API_KEY) {
  * @param {Object} responsePayload - The actual response payload (string for unary, object for stream chunks).
  * @param {boolean} isStream - Whether the response is a stream.
  */
-export async function handleUnifiedResponse(res, responsePayload, isStream) {
+export async function handleUnifiedResponse(res, responsePayload, isStream, statusCode = 200) {
     if (isStream) {
         res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "Transfer-Encoding": "chunked" });
     } else {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
     }
 
     if (isStream) {
@@ -290,6 +287,10 @@ export async function handleUnifiedResponse(res, responsePayload, isStream) {
     } else {
         res.end(responsePayload);
     }
+}
+
+function getPluginHookRequestId(config) {
+    return config?._monitorRequestId || config?._pluginRequestId || null;
 }
 
 export async function handleStreamRequest(res, service, model, requestBody, fromProvider, toProvider, PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, pooluuid, customName, retryContext = null) {
@@ -366,7 +367,8 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 : nativeChunk;
 
             // 监控钩子：流式响应分块
-            if (CONFIG?._monitorRequestId) {
+            const hookRequestId = getPluginHookRequestId(CONFIG);
+            if (hookRequestId) {
                 try {
                     const pluginManager = getPluginManager();
                     await pluginManager.executeHook('onStreamChunk', {
@@ -375,7 +377,7 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                         fromProvider,
                         toProvider,
                         model,
-                        requestId: CONFIG._monitorRequestId
+                        requestId: hookRequestId
                     });
                 } catch (e) {}
             }
@@ -675,7 +677,8 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
         }
 
         // 监控钩子：非流式响应
-        if (CONFIG?._monitorRequestId) {
+        const hookRequestId = getPluginHookRequestId(CONFIG);
+        if (hookRequestId) {
             try {
                 const pluginManager = getPluginManager();
                 await pluginManager.executeHook('onUnaryResponse', {
@@ -684,7 +687,7 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
                     fromProvider,
                     toProvider,
                     model,
-                    requestId: CONFIG._monitorRequestId
+                    requestId: hookRequestId
                 });
             } catch (e) {}
         }
@@ -786,7 +789,8 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
 
         // 使用新方法创建符合 fromProvider 格式的错误响应
         const errorResponse = createErrorResponse(error, fromProvider);
-        await handleUnifiedResponse(res, JSON.stringify(errorResponse), false);
+        const statusCode = error.status || error.code || (error.response && error.response.status) || 500;
+        await handleUnifiedResponse(res, JSON.stringify(errorResponse), false, statusCode);
     } finally {
         // 确保在请求结束或出错时释放插槽
         if (providerPoolManager && pooluuid) {
@@ -808,19 +812,48 @@ export async function handleUnaryRequest(res, service, model, requestBody, fromP
  * @param {string} pooluuid - The selected provider UUID.
  */
 export async function handleModelListRequest(req, res, service, endpointType, CONFIG, providerPoolManager, pooluuid) {
-    try {
-        const clientProviderMap = {
-            [ENDPOINT_TYPE.OPENAI_MODEL_LIST]: MODEL_PROTOCOL_PREFIX.OPENAI,
-            [ENDPOINT_TYPE.GEMINI_MODEL_LIST]: MODEL_PROTOCOL_PREFIX.GEMINI,
-        };
+    const clientProviderMap = {
+        [ENDPOINT_TYPE.OPENAI_MODEL_LIST]: MODEL_PROTOCOL_PREFIX.OPENAI,
+        [ENDPOINT_TYPE.GEMINI_MODEL_LIST]: MODEL_PROTOCOL_PREFIX.GEMINI,
+    };
 
-        const fromProvider = clientProviderMap[endpointType];
-        
+    const fromProvider = clientProviderMap[endpointType];
+
+    try {        
         if (!fromProvider) {
             throw new Error(`Unsupported endpoint type for model list: ${endpointType}`);
         }
 
         let clientModelList;
+
+        const buildConfiguredModelListResponse = (models, providerType, listEndpointType) => {
+            if (listEndpointType === ENDPOINT_TYPE.OPENAI_MODEL_LIST) {
+                return {
+                    object: 'list',
+                    data: models.map(model => ({
+                        id: model,
+                        object: 'model',
+                        created: Math.floor(Date.now() / 1000),
+                        owned_by: providerType
+                    }))
+                };
+            }
+
+            if (listEndpointType === ENDPOINT_TYPE.GEMINI_MODEL_LIST) {
+                return {
+                    models: models.map(model => ({
+                        name: `models/${model}`,
+                        baseModelId: model,
+                        version: 'v1',
+                        displayName: model,
+                        description: `Model ${model} provided by ${providerType}`,
+                        supportedGenerationMethods: ['generateContent', 'countTokens']
+                    }))
+                };
+            }
+
+            return { data: [] };
+        };
 
         // --- 核心逻辑: auto 路由模式下的模型聚合 ---
         if (CONFIG.MODEL_PROVIDER === MODEL_PROVIDER.AUTO && providerPoolManager) {
@@ -829,6 +862,15 @@ export async function handleModelListRequest(req, res, service, endpointType, CO
         } else {
             // --- 单提供商逻辑 ---
             const toProvider = CONFIG.MODEL_PROVIDER;
+            const pooledSupportedModels = getConfiguredSupportedModelsFromPool(providerPoolManager, toProvider);
+            const configuredSupportedModels = pooledSupportedModels.length > 0
+                ? pooledSupportedModels
+                : getConfiguredSupportedModels(toProvider, CONFIG);
+
+            if (usesManagedModelList(toProvider) && configuredSupportedModels.length > 0) {
+                logger.info(`[ModelList] Returning configured supported models for ${toProvider}: ${configuredSupportedModels.join(', ')}`);
+                clientModelList = buildConfiguredModelListResponse(configuredSupportedModels, toProvider, endpointType);
+            } else {
 
             // service 可能未在上层预先注入（例如仅改了路径 provider 前缀），这里兜底获取
             let resolvedService = service;
@@ -852,6 +894,7 @@ export async function handleModelListRequest(req, res, service, endpointType, CO
             } else {
                 logger.info(`[ModelList Convert] Model list format matches. No conversion needed.`);
             }
+            }
         }
 
         // logger.info(`[ModelList Response] Sending model list to client: ${JSON.stringify(clientModelList)}`);
@@ -865,7 +908,7 @@ export async function handleModelListRequest(req, res, service, endpointType, CO
         //         uuid: pooluuid
         //     }, error.message);
         // }
-        handleError(res, error, CONFIG.MODEL_PROVIDER);
+        handleError(res, error, CONFIG.MODEL_PROVIDER, fromProvider);
     }
 }
 
@@ -961,7 +1004,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     }
     
     // 为 forward provider 添加原始请求路径作为 endpoint
-    if (requestPath && toProvider === MODEL_PROVIDER.FORWARD_API) {
+    if (requestPath && getProtocolPrefix(toProvider) === MODEL_PROTOCOL_PREFIX.FORWARD) {
         logger.info(`[Forward API] Request path: ${requestPath}`);
         processedRequestBody.endpoint = requestPath;
     }
@@ -982,7 +1025,7 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
     // - 凭证切换重试：凭证被标记不健康后切换到其他凭证
     // 当没有不同的健康凭证可用时，重试会自动停止
     const credentialSwitchMaxRetries = CONFIG.CREDENTIAL_SWITCH_MAX_RETRIES || 5;
-    const retryContext = providerPoolManager ? { CONFIG, currentRetry: 0, maxRetries: credentialSwitchMaxRetries } : null;
+    const retryContext = { CONFIG, currentRetry: 0, maxRetries: credentialSwitchMaxRetries };
     
     if (isStream) {
         await handleStreamRequest(res, service, model, processedRequestBody, fromProvider, toProvider, CONFIG.PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, actualUuid, actualCustomName, retryContext);
@@ -1038,13 +1081,29 @@ export function extractPromptText(requestBody, provider) {
     return strategy.extractPromptText(requestBody);
 }
 
-export function handleError(res, error, provider = null) {
+export function handleError(res, error, provider = null, fromProvider = null, req = null) {
     const statusCode = error.response?.status || error.statusCode || error.status || error.code || 500;
+    
+    // 如果没有提供 fromProvider 但提供了 req，尝试从路径推断
+    if (!fromProvider && req && req.url) {
+        if (req.url.includes('/v1/messages')) fromProvider = MODEL_PROTOCOL_PREFIX.CLAUDE;
+        else if (req.url.includes('/v1/chat/completions')) fromProvider = MODEL_PROTOCOL_PREFIX.OPENAI;
+        else if (req.url.includes('/v1beta/models')) fromProvider = MODEL_PROTOCOL_PREFIX.GEMINI;
+    }
+
+    // 如果指定了客户端协议，则使用 createErrorResponse 创建符合该协议的错误响应
+    if (fromProvider) {
+        const errorResponse = createErrorResponse(error, fromProvider);
+        if (!res.headersSent) {
+            res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+        }
+        res.end(JSON.stringify(errorResponse));
+        return;
+    }
+
+    const hasOriginalMessage = error.message && error.message.trim() !== '';
     let errorMessage = error.message;
     let suggestions = [];
-
-    // 仅在没有传入错误信息时，才使用默认消息；否则只添加建议
-    const hasOriginalMessage = error.message && error.message.trim() !== '';
 
     // 根据提供商获取适配的错误信息和建议
     const providerSuggestions = _getProviderSpecificSuggestions(statusCode, provider);

@@ -1,27 +1,398 @@
 // 模态框管理模块
 
-import { showToast, getFieldLabel, getProviderTypeFields } from './utils.js';
+import { escapeHtml, showToast, getFieldLabel, getProviderTypeFields } from './utils.js';
 import { handleProviderPasswordToggle } from './event-handlers.js';
 import { t } from './i18n.js';
+
+const MANAGED_MODEL_LIST_PROVIDERS = new Set(['openai-custom', 'openaiResponses-custom', 'claude-custom']);
 
 // 分页配置
 const PROVIDERS_PER_PAGE = 5;
 let currentPage = 1;
 let currentProviders = [];
 let currentProviderType = '';
+let nodeSearchTerm = '';
+let currentViewMode = localStorage.getItem('providerViewMode') || 'list';
+
+function usesManagedModelList(providerType = '') {
+    return Array.from(MANAGED_MODEL_LIST_PROVIDERS).some(baseType =>
+        providerType === baseType || providerType.startsWith(`${baseType}-`)
+    );
+}
+
+function normalizeModelList(models = []) {
+    return [...new Set(
+        (Array.isArray(models) ? models : [])
+            .filter(model => typeof model === 'string')
+            .map(model => model.trim())
+            .filter(Boolean)
+    )].sort((a, b) => a.localeCompare(b));
+}
+
+function serializeModelsData(models = []) {
+    return encodeURIComponent(JSON.stringify(normalizeModelList(models)));
+}
+
+function parseModelsData(rawValue = '') {
+    if (!rawValue) {
+        return [];
+    }
+
+    try {
+        return normalizeModelList(JSON.parse(decodeURIComponent(rawValue)));
+    } catch (error) {
+        console.warn('Failed to parse models data:', error);
+        return [];
+    }
+}
+
+function renderSupportedModelsValue(models = []) {
+    const selectedModels = normalizeModelList(models);
+    if (selectedModels.length === 0) {
+        return `<div class="supported-models-empty">${escapeHtml(t('modal.provider.supportedModelsEmpty'))}</div>`;
+    }
+
+    return `
+        <div class="supported-models-list">
+            ${selectedModels.map(model => `
+                <span class="supported-model-tag" title="${escapeHtml(model)}">${escapeHtml(model)}</span>
+            `).join('')}
+        </div>
+    `;
+}
+
+function getSupportedModelsContainer(uuid) {
+    return document.querySelector(`.supported-models-container[data-uuid="${uuid}"]`);
+}
+
+function setSupportedModelsSelection(uuid, models, options = {}) {
+    const container = getSupportedModelsContainer(uuid);
+    if (!container) return;
+
+    const normalizedModels = normalizeModelList(models);
+    const encodedModels = serializeModelsData(normalizedModels);
+    container.dataset.selectedModels = encodedModels;
+
+    if (options.updateOriginal) {
+        container.dataset.originalModels = encodedModels;
+    }
+
+    const valueContainer = container.querySelector('.supported-models-values');
+    if (valueContainer) {
+        valueContainer.innerHTML = renderSupportedModelsValue(normalizedModels);
+    }
+
+    const summary = container.querySelector('.supported-models-summary');
+    if (summary) {
+        summary.textContent = t('modal.provider.modelPickerSelected', { count: normalizedModels.length });
+    }
+}
+
+function resetSupportedModelsSelection(uuid) {
+    const container = getSupportedModelsContainer(uuid);
+    if (!container) return;
+    setSupportedModelsSelection(uuid, parseModelsData(container.dataset.originalModels || ''));
+}
+
+function renderSupportedModelsSection(provider) {
+    const selectedModels = normalizeModelList(provider.supportedModels || []);
+    const encodedModels = serializeModelsData(selectedModels);
+
+    return `
+        <div class="config-item supported-models-section">
+            <label>
+                <i class="fas fa-layer-group"></i> <span data-i18n="modal.provider.supportedModels">${t('modal.provider.supportedModels')}</span>
+                <span class="help-text" data-i18n="modal.provider.supportedModelsHelp">${t('modal.provider.supportedModelsHelp')}</span>
+            </label>
+            <div class="supported-models-container"
+                 data-uuid="${provider.uuid}"
+                 data-selected-models="${encodedModels}"
+                 data-original-models="${encodedModels}">
+                <div class="supported-models-toolbar">
+                    <span class="supported-models-summary">${escapeHtml(t('modal.provider.modelPickerSelected', { count: selectedModels.length }))}</span>
+                    <button type="button"
+                            class="btn btn-outline detect-models-btn"
+                            onclick="window.openSupportedModelsPicker('${currentProviderType}', '${provider.uuid}', event)"
+                            disabled>
+                        <i class="fas fa-wand-magic-sparkles"></i>
+                        <span data-i18n="modal.provider.detectModels">${t('modal.provider.detectModels')}</span>
+                    </button>
+                </div>
+                <div class="supported-models-values">
+                    ${renderSupportedModelsValue(selectedModels)}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function collectDraftProviderConfig(providerDetail, providerType, uuid) {
+    const configInputs = providerDetail.querySelectorAll('input[data-config-key]');
+    const configSelects = providerDetail.querySelectorAll('select[data-config-key]');
+    const providerConfig = {};
+
+    configInputs.forEach(input => {
+        const key = input.dataset.configKey;
+        let value = input.value;
+        if (key === 'concurrencyLimit' || key === 'queueLimit') {
+            value = parseInt(value || '0', 10);
+        }
+        providerConfig[key] = value;
+    });
+
+    configSelects.forEach(select => {
+        const key = select.dataset.configKey;
+        providerConfig[key] = select.value === 'true';
+    });
+
+    if (usesManagedModelList(providerType)) {
+        const supportedModels = parseModelsData(getSupportedModelsContainer(uuid)?.dataset.selectedModels || '');
+        providerConfig.supportedModels = supportedModels;
+        providerConfig.notSupportedModels = [];
+    } else {
+        const modelCheckboxes = providerDetail.querySelectorAll(`.model-checkbox[data-uuid="${uuid}"]:checked`);
+        providerConfig.notSupportedModels = Array.from(modelCheckboxes).map(checkbox => checkbox.value);
+    }
+
+    return providerConfig;
+}
 let cachedModels = []; // 缓存模型列表
+
+function closeSupportedModelsPicker(overlay) {
+    if (!overlay) return;
+
+    if (overlay.escapeHandler) {
+        document.removeEventListener('keydown', overlay.escapeHandler);
+    }
+
+    overlay.remove();
+}
+
+function showSupportedModelsPickerModal(providerType, uuid, detectedModels, currentSelectedModels = []) {
+    const existingOverlay = document.querySelector('.provider-model-picker-overlay');
+    if (existingOverlay) {
+        closeSupportedModelsPicker(existingOverlay);
+    }
+
+    const allModels = normalizeModelList([...detectedModels, ...currentSelectedModels]);
+    const selectedModels = new Set(normalizeModelList(currentSelectedModels));
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay provider-model-picker-overlay';
+    overlay.style.display = 'flex';
+    overlay.innerHTML = `
+        <div class="modal-content provider-model-picker-modal">
+            <div class="modal-header">
+                <h3>
+                    <i class="fas fa-cubes"></i>
+                    ${escapeHtml(t('modal.provider.modelPickerTitle', { type: providerType }))}
+                </h3>
+                <button class="modal-close" type="button" aria-label="${escapeHtml(t('common.close'))}">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="provider-model-picker-toolbar">
+                    <input type="search"
+                           class="provider-model-picker-search"
+                           placeholder="${escapeHtml(t('modal.provider.modelPickerSearchPlaceholder'))}">
+                    <label class="provider-model-picker-select-all">
+                        <input type="checkbox" class="provider-model-picker-select-all-input">
+                        <span>${escapeHtml(t('modal.provider.modelPickerSelectAll'))}</span>
+                    </label>
+                    <button type="button" class="btn btn-secondary provider-model-picker-clear">
+                        ${escapeHtml(t('modal.provider.modelPickerClearAll'))}
+                    </button>
+                </div>
+                <div class="provider-model-picker-summary"></div>
+                <div class="provider-model-picker-list"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary provider-model-picker-cancel">
+                    ${escapeHtml(t('common.cancel'))}
+                </button>
+                <button type="button" class="btn btn-primary provider-model-picker-confirm">
+                    ${escapeHtml(t('common.confirm'))}
+                </button>
+            </div>
+        </div>
+    `;
+
+    const searchInput = overlay.querySelector('.provider-model-picker-search');
+    const listContainer = overlay.querySelector('.provider-model-picker-list');
+    const summary = overlay.querySelector('.provider-model-picker-summary');
+    const selectAllInput = overlay.querySelector('.provider-model-picker-select-all-input');
+    const clearButton = overlay.querySelector('.provider-model-picker-clear');
+    const cancelButton = overlay.querySelector('.provider-model-picker-cancel');
+    const confirmButton = overlay.querySelector('.provider-model-picker-confirm');
+    const closeButton = overlay.querySelector('.modal-close');
+
+    const getVisibleModels = () => {
+        const keyword = searchInput.value.trim().toLowerCase();
+        if (!keyword) {
+            return allModels;
+        }
+
+        return allModels.filter(model => model.toLowerCase().includes(keyword));
+    };
+
+    const updateSelectAllState = () => {
+        const visibleModels = getVisibleModels();
+        if (visibleModels.length === 0) {
+            selectAllInput.checked = false;
+            selectAllInput.indeterminate = false;
+            selectAllInput.disabled = true;
+            return;
+        }
+
+        selectAllInput.disabled = false;
+        const checkedCount = visibleModels.filter(model => selectedModels.has(model)).length;
+        selectAllInput.checked = checkedCount === visibleModels.length;
+        selectAllInput.indeterminate = checkedCount > 0 && checkedCount < visibleModels.length;
+    };
+
+    const updateSummary = () => {
+        summary.textContent = t('modal.provider.modelPickerSelected', { count: selectedModels.size });
+    };
+
+    const renderList = () => {
+        const visibleModels = getVisibleModels();
+
+        if (visibleModels.length === 0) {
+            listContainer.innerHTML = `
+                <div class="provider-model-picker-empty">
+                    ${escapeHtml(allModels.length === 0 ? t('modal.provider.detectModelsNoResults') : t('modal.provider.supportedModelsEmpty'))}
+                </div>
+            `;
+            updateSelectAllState();
+            updateSummary();
+            return;
+        }
+
+        listContainer.innerHTML = visibleModels.map(model => `
+            <label class="provider-model-picker-item">
+                <input type="checkbox"
+                       value="${escapeHtml(model)}"
+                       ${selectedModels.has(model) ? 'checked' : ''}>
+                <span>${escapeHtml(model)}</span>
+            </label>
+        `).join('');
+
+        listContainer.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
+            checkbox.addEventListener('change', () => {
+                if (checkbox.checked) {
+                    selectedModels.add(checkbox.value);
+                } else {
+                    selectedModels.delete(checkbox.value);
+                }
+                updateSelectAllState();
+                updateSummary();
+            });
+        });
+
+        updateSelectAllState();
+        updateSummary();
+    };
+
+    const handleClose = () => closeSupportedModelsPicker(overlay);
+
+    overlay.escapeHandler = event => {
+        if (event.key === 'Escape') {
+            handleClose();
+        }
+    };
+
+    document.addEventListener('keydown', overlay.escapeHandler);
+    overlay.addEventListener('click', event => {
+        if (event.target === overlay) {
+            handleClose();
+        }
+    });
+
+    searchInput.addEventListener('input', renderList);
+    selectAllInput.addEventListener('change', () => {
+        const visibleModels = getVisibleModels();
+        visibleModels.forEach(model => {
+            if (selectAllInput.checked) {
+                selectedModels.add(model);
+            } else {
+                selectedModels.delete(model);
+            }
+        });
+        renderList();
+    });
+    clearButton.addEventListener('click', () => {
+        selectedModels.clear();
+        renderList();
+    });
+    cancelButton.addEventListener('click', handleClose);
+    closeButton.addEventListener('click', handleClose);
+    confirmButton.addEventListener('click', () => {
+        setSupportedModelsSelection(uuid, Array.from(selectedModels));
+        handleClose();
+    });
+
+    document.body.appendChild(overlay);
+    renderList();
+    searchInput.focus();
+}
+
+async function openSupportedModelsPicker(providerType, uuid, event) {
+    event.stopPropagation();
+
+    if (!usesManagedModelList(providerType)) {
+        return;
+    }
+
+    const providerDetail = event.target.closest('.provider-item-detail, .provider-item-card');
+    if (!providerDetail) {
+        return;
+    }
+
+    const detectButton = providerDetail.querySelector('.detect-models-btn');
+    const originalHtml = detectButton?.innerHTML;
+    const draftProviderConfig = collectDraftProviderConfig(providerDetail, providerType, uuid);
+
+    try {
+        if (detectButton) {
+            detectButton.disabled = true;
+            detectButton.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${escapeHtml(t('common.loading'))}`;
+        }
+
+        const response = await window.apiClient.post(
+            `/providers/${encodeURIComponent(providerType)}/${uuid}/detect-models`,
+            { providerConfig: draftProviderConfig }
+        );
+
+        showSupportedModelsPickerModal(
+            providerType,
+            uuid,
+            response.models || [],
+            draftProviderConfig.supportedModels || response.selectedModels || []
+        );
+    } catch (error) {
+        console.error('Failed to detect provider models:', error);
+        showToast(t('common.error'), t('modal.provider.detectModelsFailed') + ': ' + error.message, 'error');
+    } finally {
+        if (detectButton) {
+            detectButton.innerHTML = originalHtml;
+            detectButton.disabled = !providerDetail.classList.contains('editing');
+        }
+    }
+}
 
 /**
  * 显示提供商管理模态框
  * @param {Object} data - 提供商数据
+ * @param {string} initialSearchTerm - 初始搜索词
  */
-function showProviderManagerModal(data) {
+function showProviderManagerModal(data, initialSearchTerm = '') {
     const { providerType, providers, totalCount, healthyCount } = data;
     
     // 保存当前数据用于分页
     currentProviders = providers;
     currentProviderType = providerType;
     currentPage = 1;
+    nodeSearchTerm = initialSearchTerm;
     cachedModels = [];
     
     // 移除已存在的模态框
@@ -76,14 +447,28 @@ function showProviderManagerModal(data) {
                         </button>
                     </div>
                 </div>
-                
-                ${totalPages > 1 ? renderPagination(1, totalPages, providers.length) : ''}
-                
-                <div class="provider-list" id="providerList">
-                    ${renderProviderListPaginated(providers, 1)}
+
+                <div class="provider-nodes-toolbar" style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center;">
+                    <div class="search-input-wrapper" style="position: relative; flex: 1;">
+                        <i class="fas fa-search" style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-tertiary);"></i>
+                        <input type="text" id="nodeSearchInput" 
+                               value="${escapeHtml(nodeSearchTerm)}"
+                               placeholder="${t('modal.provider.searchNodesPlaceholder') || '搜索节点名称、UUID 或配置内容...'}" 
+                               style="width: 100%; padding: 10px 12px 10px 35px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);">
+                    </div>
+                    <div class="view-mode-toggle" style="display: flex; background: var(--bg-secondary); padding: 4px; border-radius: 8px; border: 1px solid var(--border-color);">
+                        <button class="view-mode-btn ${currentViewMode === 'list' ? 'active' : ''}" data-mode="list" title="${t('common.view.list') || '列表视图'}" style="border: none; background: ${currentViewMode === 'list' ? 'var(--primary-color)' : 'transparent'}; color: ${currentViewMode === 'list' ? '#fff' : 'var(--text-secondary)'}; padding: 6px 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;">
+                            <i class="fas fa-list"></i>
+                        </button>
+                        <button class="view-mode-btn ${currentViewMode === 'card' ? 'active' : ''}" data-mode="card" title="${t('common.view.card') || '卡片视图'}" style="border: none; background: ${currentViewMode === 'card' ? 'var(--primary-color)' : 'transparent'}; color: ${currentViewMode === 'card' ? '#fff' : 'var(--text-secondary)'}; padding: 6px 10px; border-radius: 6px; cursor: pointer; transition: all 0.2s;">
+                            <i class="fas fa-th-large"></i>
+                        </button>
+                    </div>
                 </div>
                 
-                ${totalPages > 1 ? renderPagination(1, totalPages, providers.length, 'bottom') : ''}
+                <div id="paginationTop"></div>
+                <div class="provider-list" id="providerList"></div>
+                <div id="paginationBottom"></div>
             </div>
         </div>
     `;
@@ -94,9 +479,8 @@ function showProviderManagerModal(data) {
     // 添加模态框事件监听
     addModalEventListeners(modal);
     
-    // 先获取该提供商类型的模型列表（只调用一次API）
-    const pageProviders = providers.slice(0, PROVIDERS_PER_PAGE);
-    loadModelsForProviderType(providerType, pageProviders);
+    // 初始渲染
+    window.goToProviderPage(1);
 }
 
 /**
@@ -108,16 +492,19 @@ function showProviderManagerModal(data) {
  * @returns {string} HTML字符串
  */
 function renderPagination(page, totalPages, totalItems, position = 'top') {
+    if (totalPages <= 1 || currentViewMode === 'card') {
+        return `<div class="pagination-container" data-position="${position}"></div>`;
+    }
+    
     const startItem = (page - 1) * PROVIDERS_PER_PAGE + 1;
     const endItem = Math.min(page * PROVIDERS_PER_PAGE, totalItems);
     
-    // 生成页码按钮
     let pageButtons = '';
     const maxVisiblePages = 5;
     let startPage = Math.max(1, page - Math.floor(maxVisiblePages / 2));
     let endPage = Math.min(totalPages, startPage + maxVisiblePages - 1);
     
-    if (endPage - startPage < maxVisiblePages - 1) {
+    if (endPage - startPage + 1 < maxVisiblePages) {
         startPage = Math.max(1, endPage - maxVisiblePages + 1);
     }
     
@@ -165,30 +552,68 @@ function renderPagination(page, totalPages, totalItems, position = 'top') {
 }
 
 /**
+ * 获取过滤后的提供商列表
+ */
+function getFilteredProviders() {
+    if (!nodeSearchTerm) return currentProviders;
+    const term = nodeSearchTerm.toLowerCase().trim();
+    return currentProviders.filter(p => {
+        // 搜索字段：自定义名称、UUID、API Key、Base URL、OAuth 路径等
+        const searchFields = [
+            p.customName,
+            p.uuid,
+            p.OPENAI_API_KEY,
+            p.OPENAI_BASE_URL,
+            p.CLAUDE_API_KEY,
+            p.CLAUDE_BASE_URL,
+            p.GEMINI_OAUTH_CREDS_FILE_PATH,
+            p.KIRO_OAUTH_CREDS_FILE_PATH,
+            p.QWEN_OAUTH_CREDS_FILE_PATH,
+            p.ANTIGRAVITY_OAUTH_CREDS_FILE_PATH,
+            p.IFLOW_OAUTH_CREDS_FILE_PATH,
+            p.CODEX_OAUTH_CREDS_FILE_PATH,
+            p.GROK_COOKIE_TOKEN,
+            p.FORWARD_API_KEY,
+            p.checkModelName
+        ];
+        
+        return searchFields.some(field => 
+            field && String(field).toLowerCase().includes(term)
+        );
+    });
+}
+
+/**
  * 跳转到指定页
  * @param {number} page - 目标页码
  */
 function goToProviderPage(page) {
-    const totalPages = Math.ceil(currentProviders.length / PROVIDERS_PER_PAGE);
+    const filteredProviders = getFilteredProviders();
+    const totalPages = Math.ceil(filteredProviders.length / PROVIDERS_PER_PAGE);
     
     // 验证页码范围
     if (page < 1) page = 1;
-    if (page > totalPages) page = totalPages;
+    if (page > totalPages && totalPages > 0) page = totalPages;
+    if (totalPages === 0) page = 1;
     
     currentPage = page;
     
     // 更新提供商列表
     const providerList = document.getElementById('providerList');
     if (providerList) {
-        providerList.innerHTML = renderProviderListPaginated(currentProviders, page);
+        providerList.innerHTML = renderProviderListPaginated(filteredProviders, page);
     }
     
     // 更新分页控件
-    const paginationContainers = document.querySelectorAll('.pagination-container');
-    paginationContainers.forEach(container => {
-        const position = container.getAttribute('data-position');
-        container.outerHTML = renderPagination(page, totalPages, currentProviders.length, position);
-    });
+    const paginationTop = document.getElementById('paginationTop');
+    const paginationBottom = document.getElementById('paginationBottom');
+    
+    if (paginationTop) {
+        paginationTop.innerHTML = totalPages > 1 ? renderPagination(page, totalPages, filteredProviders.length) : '';
+    }
+    if (paginationBottom) {
+        paginationBottom.innerHTML = totalPages > 1 ? renderPagination(page, totalPages, filteredProviders.length, 'bottom') : '';
+    }
     
     // 滚动到顶部
     const modalBody = document.querySelector('.provider-modal-body');
@@ -198,15 +623,15 @@ function goToProviderPage(page) {
     
     // 为当前页的提供商加载模型列表
     const startIndex = (page - 1) * PROVIDERS_PER_PAGE;
-    const endIndex = Math.min(startIndex + PROVIDERS_PER_PAGE, currentProviders.length);
-    const pageProviders = currentProviders.slice(startIndex, endIndex);
+    const endIndex = Math.min(startIndex + PROVIDERS_PER_PAGE, filteredProviders.length);
+    const pageProviders = filteredProviders.slice(startIndex, endIndex);
     
     // 如果已缓存模型列表，直接使用
-    if (cachedModels.length > 0) {
+    if (!usesManagedModelList(currentProviderType) && cachedModels.length > 0) {
         pageProviders.forEach(provider => {
             renderNotSupportedModelsSelector(provider.uuid, cachedModels, provider.notSupportedModels || []);
         });
-    } else {
+    } else if (!usesManagedModelList(currentProviderType)) {
         loadModelsForProviderType(currentProviderType, pageProviders);
     }
 }
@@ -218,6 +643,20 @@ function goToProviderPage(page) {
  * @returns {string} HTML字符串
  */
 function renderProviderListPaginated(providers, page) {
+    if (providers.length === 0) {
+        return `
+            <div class="no-providers">
+                <i class="fas fa-search" style="font-size: 2rem; opacity: 0.3; display: block; margin-bottom: 1rem;"></i>
+                <p>${t('common.noResults') || '没有找到匹配的节点'}</p>
+            </div>
+        `;
+    }
+
+    // 如果是卡片模式，显示所有节点，不分页
+    if (currentViewMode === 'card') {
+        return renderProviderList(providers);
+    }
+
     const startIndex = (page - 1) * PROVIDERS_PER_PAGE;
     const endIndex = Math.min(startIndex + PROVIDERS_PER_PAGE, providers.length);
     const pageProviders = providers.slice(startIndex, endIndex);
@@ -232,6 +671,10 @@ function renderProviderListPaginated(providers, page) {
  */
 async function loadModelsForProviderType(providerType, providers) {
     try {
+        if (usesManagedModelList(providerType)) {
+            return;
+        }
+
         // 如果已有缓存，直接使用
         if (cachedModels.length > 0) {
             providers.forEach(provider => {
@@ -279,6 +722,18 @@ function addModalEventListeners(modal) {
     // 点击背景关闭模态框
     const handleBackgroundClick = (event) => {
         if (event.target === modal) {
+            // 检查是否有正在编辑的节点
+            const editingProvider = modal.querySelector('.provider-item-detail.editing, .provider-item-card.editing');
+            if (editingProvider) {
+                // showToast(t('common.warning'), '请先保存或取消编辑操作', 'warning');
+                return;
+            }
+            // 检查是否有正在新增的表单
+            const addForm = modal.querySelector('.add-provider-form');
+            if (addForm) {
+                // showToast(t('common.warning'), '请先保存或取消添加操作', 'warning');
+                return;
+            }
             modal.remove();
             document.removeEventListener('keydown', handleEscKey);
         }
@@ -313,6 +768,38 @@ function addModalEventListeners(modal) {
             }
         }
     };
+
+    // 节点搜索事件处理
+    const searchInput = modal.querySelector('#nodeSearchInput');
+    if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+            nodeSearchTerm = e.target.value;
+            window.goToProviderPage(1); // 搜索时重置回第一页
+        });
+    }
+
+    // 视图模式切换事件处理
+    const viewModeBtns = modal.querySelectorAll('.view-mode-btn');
+    viewModeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const mode = btn.dataset.mode;
+            if (mode === currentViewMode) return;
+
+            currentViewMode = mode;
+            localStorage.setItem('providerViewMode', mode);
+
+            // 更新按钮状态
+            viewModeBtns.forEach(b => {
+                const isActive = b.dataset.mode === mode;
+                b.classList.toggle('active', isActive);
+                b.style.background = isActive ? 'var(--primary-color)' : 'transparent';
+                b.style.color = isActive ? '#fff' : 'var(--text-secondary)';
+            });
+
+            // 重新渲染当前页
+            window.goToProviderPage(currentPage);
+        });
+    });
     
     // 添加事件监听器
     document.addEventListener('keydown', handleEscKey);
@@ -350,11 +837,11 @@ function closeProviderModal(button) {
 }
 
 /**
- * 渲染提供商列表
+ * 渲染提供商列表（详细模式）
  * @param {Array} providers - 提供商数组
  * @returns {string} HTML字符串
  */
-function renderProviderList(providers) {
+function renderProviderDetailList(providers) {
     return providers.map(provider => {
         const isHealthy = provider.isHealthy;
         const isDisabled = provider.isDisabled || false;
@@ -370,6 +857,7 @@ function renderProviderList(providers) {
         const toggleButtonText = isDisabled ? t('modal.provider.enabled') : t('modal.provider.disabled');
         const toggleButtonIcon = isDisabled ? 'fas fa-play' : 'fas fa-ban';
         const toggleButtonClass = isDisabled ? 'btn-success' : 'btn-warning';
+        const needsRefresh = !!provider.needsRefresh;
         
         // 构建错误信息显示
         let errorInfoHtml = '';
@@ -388,7 +876,10 @@ function renderProviderList(providers) {
             <div class="provider-item-detail ${healthClass} ${disabledClass}" data-uuid="${provider.uuid}">
                 <div class="provider-item-header" onclick="window.toggleProviderDetails('${provider.uuid}')">
                     <div class="provider-info">
-                        <div class="provider-name">${provider.customName || provider.uuid}</div>
+                        <div class="provider-name">
+                            ${provider.customName || provider.uuid}
+                            ${needsRefresh ? `<span class="badge badge-warning" style="font-size: 10px; margin-left: 8px; vertical-align: middle;"><i class="fas fa-sync-alt fa-spin"></i> <span data-i18n="providers.status.needsRefresh">${t('providers.status.needsRefresh')}</span></span>` : ''}
+                        </div>
                         <div class="provider-meta">
                             <span class="health-status">
                                 <i class="${healthIcon}"></i>
@@ -421,6 +912,9 @@ function renderProviderList(providers) {
                         <button class="btn-small btn-edit" onclick="window.editProvider('${provider.uuid}', event)">
                             <i class="fas fa-edit"></i> <span data-i18n="modal.provider.edit">编辑</span>
                         </button>
+                        <button class="btn-small btn-info btn-provider-health-check" onclick="window.performSingleHealthCheck('${provider.uuid}', event)" title="${t('modal.provider.healthCheckCurrentTitle')}">
+                            <i class="fas fa-stethoscope"></i> <span data-i18n="modal.provider.healthCheck">${t('modal.provider.healthCheck')}</span>
+                        </button>
                         <button class="btn-small btn-delete" onclick="window.deleteProvider('${provider.uuid}', event)">
                             <i class="fas fa-trash"></i> <span data-i18n="modal.provider.delete">删除</span>
                         </button>
@@ -437,6 +931,72 @@ function renderProviderList(providers) {
             </div>
         `;
     }).join('');
+}
+
+/**
+ * 渲染提供商列表（卡片模式）
+ * @param {Array} providers - 提供商数组
+ * @returns {string} HTML字符串
+ */
+function renderProviderCardList(providers) {
+    let html = '<div class="provider-cards-grid">';
+    html += providers.map(provider => {
+        const isHealthy = provider.isHealthy;
+        const isDisabled = provider.isDisabled || false;
+        const healthClass = isHealthy ? 'healthy' : 'unhealthy';
+        const disabledClass = isDisabled ? 'disabled' : '';
+        const displayName = provider.customName || provider.uuid;
+        const needsRefresh = !!provider.needsRefresh;
+        const toggleButtonText = isDisabled ? t('modal.provider.enabled') : t('modal.provider.disabled');
+        const toggleButtonIcon = isDisabled ? 'fas fa-play' : 'fas fa-ban';
+        const toggleButtonClass = isDisabled ? 'btn-success' : 'btn-warning';
+
+        return `
+            <div class="provider-item-card ${healthClass} ${disabledClass}" data-uuid="${provider.uuid}" onclick="window.toggleProviderDetails('${provider.uuid}')">
+                <div class="card-header">
+                    <div class="card-status-dot"></div>
+                    <div class="card-name" title="${displayName}">${displayName}</div>
+                    ${needsRefresh ? '<i class="fas fa-sync-alt fa-spin card-refresh-icon"></i>' : ''}
+                </div>
+                <div class="card-body">
+                    <div class="card-stat" title="${t('modal.provider.usageCount')}: ${provider.usageCount || 0}">
+                        <i class="fas fa-paper-plane"></i>
+                        <span>${provider.usageCount || 0}</span>
+                    </div>
+                    <div class="card-stat" title="${t('modal.provider.errorCount')}: ${provider.errorCount || 0}">
+                        <i class="fas fa-exclamation-circle"></i>
+                        <span>${provider.errorCount || 0}</span>
+                    </div>
+                </div>
+                <div class="card-actions" onclick="event.stopPropagation()">
+                    <button class="card-action-btn ${toggleButtonClass}" onclick="window.toggleProviderStatus('${provider.uuid}', event)" title="${toggleButtonText}">
+                        <i class="${toggleButtonIcon}"></i>
+                    </button>
+                    <button class="card-action-btn btn-delete" onclick="window.deleteProvider('${provider.uuid}', event)" title="${t('modal.provider.delete')}">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+                <div class="provider-item-content" id="content-${provider.uuid}">
+                    ${renderProviderConfig(provider)}
+                </div>
+            </div>
+        `;
+    }).join('');
+    html += '</div>';
+    return html;
+}
+
+/**
+ * 渲染提供商列表
+ * @param {Array} providers - 提供商数组
+ * @returns {string} HTML字符串
+ */
+function renderProviderList(providers) {
+    if (currentViewMode === 'card') {
+        return renderProviderCardList(providers);
+    } else {
+        return renderProviderDetailList(providers);
+    }
 }
 
 /**
@@ -643,6 +1203,13 @@ function renderProviderConfig(provider) {
     }
     
     // 添加 notSupportedModels 配置区域
+    if (usesManagedModelList(currentProviderType)) {
+        html += '<div class="form-grid full-width">';
+        html += renderSupportedModelsSection(provider);
+        html += '</div>';
+        return html;
+    }
+
     html += '<div class="form-grid full-width">';
     html += `
         <div class="config-item not-supported-models-section">
@@ -667,33 +1234,26 @@ function renderProviderConfig(provider) {
  * @param {Object} provider - 提供商对象
  * @returns {Array} 字段键数组
  */
+/**
+ * 获取字段显示顺序
+ * @param {Object} provider - 提供商对象
+ * @returns {Array} 字段名数组
+ */
 function getFieldOrder(provider) {
-    const orderedFields = ['customName', 'checkModelName', 'checkHealth'];
+    const orderedFields = ['customName', 'checkModelName', 'checkHealth', 'concurrencyLimit', 'queueLimit'];
     
     // 需要排除的内部状态字段
     const excludedFields = [
         'isHealthy', 'lastUsed', 'usageCount', 'errorCount', 'lastErrorTime',
         'uuid', 'isDisabled', 'lastHealthCheckTime', 'lastHealthCheckModel', 'lastErrorMessage',
-        'notSupportedModels', 'refreshCount', 'needsRefresh', '_lastSelectionSeq'
+        'notSupportedModels', 'supportedModels', 'refreshCount', 'needsRefresh', '_lastSelectionSeq',
+        'lastRefreshTime', 'lastSuccessTime'
     ];
     
-    // 从 getProviderTypeFields 获取字段顺序映射
-    const fieldOrderMap = {
-        'openai-custom': ['OPENAI_API_KEY', 'OPENAI_BASE_URL'],
-        'openaiResponses-custom': ['OPENAI_API_KEY', 'OPENAI_BASE_URL'],
-        'claude-custom': ['CLAUDE_API_KEY', 'CLAUDE_BASE_URL'],
-        'gemini-cli-oauth': ['PROJECT_ID', 'GEMINI_OAUTH_CREDS_FILE_PATH', 'GEMINI_BASE_URL'],
-        'claude-kiro-oauth': ['KIRO_OAUTH_CREDS_FILE_PATH', 'KIRO_BASE_URL', 'KIRO_REFRESH_URL', 'KIRO_REFRESH_IDC_URL'],
-        'openai-qwen-oauth': ['QWEN_OAUTH_CREDS_FILE_PATH', 'QWEN_BASE_URL', 'QWEN_OAUTH_BASE_URL'],
-        'gemini-antigravity': ['PROJECT_ID', 'ANTIGRAVITY_OAUTH_CREDS_FILE_PATH', 'ANTIGRAVITY_BASE_URL_DAILY', 'ANTIGRAVITY_BASE_URL_AUTOPUSH'],
-        'openai-iflow': ['IFLOW_OAUTH_CREDS_FILE_PATH', 'IFLOW_BASE_URL'],
-        'openai-codex-oauth': ['CODEX_OAUTH_CREDS_FILE_PATH', 'CODEX_EMAIL', 'CODEX_BASE_URL'],
-        'grok-custom': ['GROK_COOKIE_TOKEN', 'GROK_CF_CLEARANCE', 'GROK_USER_AGENT', 'GROK_BASE_URL'],
-        'forward-api': ['FORWARD_API_KEY', 'FORWARD_BASE_URL', 'FORWARD_HEADER_NAME', 'FORWARD_HEADER_VALUE_PREFIX']
-    };
-    
-    // 尝试从全局或当前模态框上下文中推断提供商类型
+    // 尝试从当前模态框上下文中获取提供商类型
     let providerType = currentProviderType;
+    
+    // 如果没有上下文类型，尝试从对象字段推断（回退逻辑）
     if (!providerType) {
         if (provider.OPENAI_API_KEY && provider.OPENAI_BASE_URL) {
             providerType = 'openai-custom';
@@ -718,8 +1278,9 @@ function getFieldOrder(provider) {
         }
     }
 
-    // 获取该类型应该具有的所有字段（预定义顺序）
-    const predefinedOrder = providerType ? (fieldOrderMap[providerType] || []) : [];
+    // 直接从 utils.js 获取该类型的预定义字段列表（支持前缀匹配）
+    const predefinedFields = providerType ? getProviderTypeFields(providerType) : [];
+    const predefinedOrder = predefinedFields.map(f => f.id);
     
     // 获取当前对象中存在且不在预定义列表中的其他字段
     const otherFields = Object.keys(provider).filter(key =>
@@ -734,12 +1295,8 @@ function getFieldOrder(provider) {
     
     // 只有在字段确实存在于 provider 中，或者它是该提供商类型的预定义字段时才显示
     return allExpectedFields.filter(key =>
-        provider.hasOwnProperty(key) || predefinedOrder.includes(key)
+        Object.prototype.hasOwnProperty.call(provider, key) || predefinedOrder.includes(key)
     );
-    
-    // 如果无法识别提供商类型，按字母顺序排序
-    otherFields.sort();
-    return [...orderedFields, ...otherFields].filter(key => provider.hasOwnProperty(key));
 }
 
 /**
@@ -761,7 +1318,7 @@ function toggleProviderDetails(uuid) {
 function editProvider(uuid, event) {
     event.stopPropagation();
     
-    const providerDetail = event.target.closest('.provider-item-detail');
+    const providerDetail = event.target.closest('.provider-item-detail, .provider-item-card');
     const configInputs = providerDetail.querySelectorAll('input[data-config-key]');
     const configSelects = providerDetail.querySelectorAll('select[data-config-key]');
     const content = providerDetail.querySelector(`#content-${uuid}`);
@@ -798,6 +1355,11 @@ function editProvider(uuid, event) {
         modelCheckboxes.forEach(checkbox => {
             checkbox.disabled = false;
         });
+
+        const detectModelsButton = providerDetail.querySelector('.detect-models-btn');
+        if (detectModelsButton) {
+            detectModelsButton.disabled = false;
+        }
         
         // 添加编辑状态类
         providerDetail.classList.add('editing');
@@ -824,7 +1386,7 @@ function editProvider(uuid, event) {
 function cancelEdit(uuid, event) {
     event.stopPropagation();
     
-    const providerDetail = event.target.closest('.provider-item-detail');
+    const providerDetail = event.target.closest('.provider-item-detail, .provider-item-card');
     const configInputs = providerDetail.querySelectorAll('input[data-config-key]');
     const configSelects = providerDetail.querySelectorAll('select[data-config-key]');
     
@@ -845,6 +1407,20 @@ function cancelEdit(uuid, event) {
     modelCheckboxes.forEach(checkbox => {
         checkbox.disabled = true;
     });
+
+    const detectModelsButton = providerDetail.querySelector('.detect-models-btn');
+    if (detectModelsButton) {
+        detectModelsButton.disabled = true;
+    }
+
+    if (usesManagedModelList(currentProviderType)) {
+        resetSupportedModelsSelection(uuid);
+    } else {
+        const currentProviderData = currentProviders.find(provider => provider.uuid === uuid);
+        if (currentProviderData) {
+            renderNotSupportedModelsSelector(uuid, cachedModels, currentProviderData.notSupportedModels || []);
+        }
+    }
     
     // 移除编辑状态类
     providerDetail.classList.remove('editing');
@@ -878,6 +1454,9 @@ function cancelEdit(uuid, event) {
         <button class="btn-small btn-edit" onclick="window.editProvider('${uuid}', event)">
             <i class="fas fa-edit"></i> <span data-i18n="modal.provider.edit">${t('modal.provider.edit')}</span>
         </button>
+        <button class="btn-small btn-info btn-provider-health-check" onclick="window.performSingleHealthCheck('${uuid}', event)" title="${t('modal.provider.healthCheckCurrentTitle')}">
+            <i class="fas fa-stethoscope"></i> <span data-i18n="modal.provider.healthCheck">${t('modal.provider.healthCheck')}</span>
+        </button>
         <button class="btn-small btn-delete" onclick="window.deleteProvider('${uuid}', event)">
             <i class="fas fa-trash"></i> <span data-i18n="modal.provider.delete">${t('modal.provider.delete')}</span>
         </button>
@@ -895,32 +1474,14 @@ function cancelEdit(uuid, event) {
 async function saveProvider(uuid, event) {
     event.stopPropagation();
     
-    const providerDetail = event.target.closest('.provider-item-detail');
+    const providerDetail = event.target.closest('.provider-item-detail, .provider-item-card');
     const providerType = providerDetail.closest('.provider-modal').getAttribute('data-provider-type');
     
-    const configInputs = providerDetail.querySelectorAll('input[data-config-key]');
-    const configSelects = providerDetail.querySelectorAll('select[data-config-key]');
-    const providerConfig = {};
+    const providerConfig = collectDraftProviderConfig(providerDetail, providerType, uuid);
     
-    configInputs.forEach(input => {
-        const key = input.dataset.configKey;
-        let value = input.value;
-        if (key === 'concurrencyLimit' || key === 'queueLimit') {
-            value = parseInt(value || '0');
-        }
-        providerConfig[key] = value;
-    });
     
-    configSelects.forEach(select => {
-        const key = select.dataset.configKey;
-        const value = select.value === 'true';
-        providerConfig[key] = value;
-    });
     
     // 收集不支持的模型列表
-    const modelCheckboxes = providerDetail.querySelectorAll(`.model-checkbox[data-uuid="${uuid}"]:checked`);
-    const notSupportedModels = Array.from(modelCheckboxes).map(checkbox => checkbox.value);
-    providerConfig.notSupportedModels = notSupportedModels;
     
     try {
         await window.apiClient.put(`/providers/${encodeURIComponent(providerType)}/${uuid}`, { providerConfig });
@@ -946,7 +1507,7 @@ async function deleteProvider(uuid, event) {
         return;
     }
     
-    const providerDetail = event.target.closest('.provider-item-detail');
+    const providerDetail = event.target.closest('.provider-item-detail, .provider-item-card');
     const providerType = providerDetail.closest('.provider-modal').getAttribute('data-provider-type');
     
     try {
@@ -1332,7 +1893,7 @@ async function addProvider(providerType) {
 async function toggleProviderStatus(uuid, event) {
     event.stopPropagation();
     
-    const providerDetail = event.target.closest('.provider-item-detail');
+    const providerDetail = event.target.closest('.provider-item-detail, .provider-item-card');
     const providerType = providerDetail.closest('.provider-modal').getAttribute('data-provider-type');
     const currentProvider = providerDetail.closest('.provider-modal').querySelector(`[data-uuid="${uuid}"]`);
     
@@ -1441,6 +2002,67 @@ async function performHealthCheck(providerType) {
  * @param {string} uuid - 提供商UUID
  * @param {Event} event - 事件对象
  */
+async function performSingleHealthCheck(uuid, event) {
+    event.stopPropagation();
+
+    const button = event.currentTarget || event.target.closest('button');
+    const providerDetail = event.target.closest('.provider-item-detail, .provider-item-card');
+    const providerType = providerDetail?.closest('.provider-modal')?.getAttribute('data-provider-type');
+
+    if (!providerDetail || !providerType) {
+        showToast(t('common.error'), t('modal.provider.healthCheckSingleFailed', { message: t('common.error') }), 'error');
+        return;
+    }
+
+    const originalHtml = button ? button.innerHTML : '';
+
+    try {
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = `<i class="fas fa-spinner fa-spin"></i> <span>${t('modal.provider.healthCheck')}</span>`;
+        }
+
+        showToast(t('common.info'), t('modal.provider.healthCheck') + '...', 'info');
+
+        const response = await window.apiClient.post(
+            `/providers/${encodeURIComponent(providerType)}/${uuid}/health-check`,
+            {}
+        );
+
+        if (!response.success) {
+            showToast(t('common.error'), t('modal.provider.healthCheckSingleFailed', { message: t('common.error') }), 'error');
+            return;
+        }
+
+        const message = response.healthy
+            ? (response.modelName
+                ? t('modal.provider.healthCheckSingleSuccessWithModel', { model: response.modelName })
+                : t('modal.provider.healthCheckSingleSuccess'))
+            : t('modal.provider.healthCheckSingleFailed', { message: response.message || t('common.error') });
+
+        showToast(
+            response.healthy ? t('common.success') : t('common.warning'),
+            message,
+            response.healthy ? 'success' : 'warning'
+        );
+
+        await window.apiClient.post('/reload-config');
+        await refreshProviderConfig(providerType);
+    } catch (error) {
+        console.error('Single provider health check failed:', error);
+        showToast(
+            t('common.error'),
+            t('modal.provider.healthCheckSingleFailed', { message: error.message }),
+            'error'
+        );
+    } finally {
+        if (button && button.isConnected) {
+            button.innerHTML = originalHtml;
+            button.disabled = false;
+        }
+    }
+}
+
 async function refreshProviderUuid(uuid, event) {
     event.stopPropagation();
     
@@ -1448,7 +2070,7 @@ async function refreshProviderUuid(uuid, event) {
         return;
     }
     
-    const providerDetail = event.target.closest('.provider-item-detail');
+    const providerDetail = event.target.closest('.provider-item-detail, .provider-item-card');
     const providerType = providerDetail.closest('.provider-modal').getAttribute('data-provider-type');
     
     try {
@@ -1617,9 +2239,11 @@ export {
     performHealthCheck,
     deleteUnhealthyProviders,
     refreshUnhealthyUuids,
+    openSupportedModelsPicker,
     loadModelsForProviderType,
     renderNotSupportedModelsSelector,
     goToProviderPage,
+    performSingleHealthCheck,
     refreshProviderUuid
 };
 
@@ -1635,7 +2259,9 @@ window.addProvider = addProvider;
 window.toggleProviderStatus = toggleProviderStatus;
 window.resetAllProvidersHealth = resetAllProvidersHealth;
 window.performHealthCheck = performHealthCheck;
+window.performSingleHealthCheck = performSingleHealthCheck;
 window.deleteUnhealthyProviders = deleteUnhealthyProviders;
 window.refreshUnhealthyUuids = refreshUnhealthyUuids;
+window.openSupportedModelsPicker = openSupportedModelsPicker;
 window.goToProviderPage = goToProviderPage;
 window.refreshProviderUuid = refreshProviderUuid;

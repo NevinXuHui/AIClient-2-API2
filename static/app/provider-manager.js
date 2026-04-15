@@ -1,7 +1,7 @@
 // 提供商管理功能模块
 
 import { providerStats, updateProviderStats } from './constants.js';
-import { showToast, formatUptime, getProviderConfigs } from './utils.js';
+import { showToast, formatUptime, getProviderConfigs, getBaseProviderConfigs } from './utils.js';
 import { fileUploadHandler } from './file-upload.js';
 import { t, getCurrentLanguage } from './i18n.js';
 import { renderRoutingExamples } from './routing-examples.js';
@@ -178,34 +178,36 @@ function updateTimeDisplay() {
 }
 
 /**
- * 加载提供商列表
+ * 加载提供商数据
+ * @param {boolean} forceRefreshSupported - 是否强制刷新支持的提供商列表
  */
-async function loadProviders() {
+async function loadProviders(forceRefreshSupported = false) {
     try {
-        const providers = await window.apiClient.get('/providers');
+        // 获取合并后的数据（包括 providers 和 supportedProviders）
+        const data = await window.apiClient.get('/providers');
+        if (!data || !data.providers) return;
 
-        // 动态更新其他模块的提供商信息，只需更新一次
-        if (!isStaticProviderConfigsUpdated) {
-            cachedSupportedProviders = await window.apiClient.get('/providers/supported');
+        const { providers, supportedProviders } = data;
+        
+        // 检查支持列表是否发生了变化（或者是否尚未初始化）
+        const isChanged = !cachedSupportedProviders || 
+                         supportedProviders.length !== cachedSupportedProviders.length ||
+                         supportedProviders.some((p, i) => p !== cachedSupportedProviders[i]);
+
+        // 如果强制刷新或是对象类型（可能是由事件触发），则也视为需要刷新
+        const shouldForce = forceRefreshSupported === true || (typeof forceRefreshSupported === 'object');
+
+        if (isChanged || shouldForce) {
+            cachedSupportedProviders = supportedProviders;
             const providerConfigs = getProviderConfigs(cachedSupportedProviders);
             
-            // 动态更新凭据文件管理的提供商类型筛选项
-            updateProviderFilterOptions(providerConfigs);
-            
-            // 动态更新仪表盘页面的路径路由调用示例
-            renderRoutingExamples(providerConfigs);
-            
-            // 动态更新仪表盘页面的可用模型列表提供商信息
+            // 动态更新各个页面的提供商信息
             updateModelsProviderConfigs(providerConfigs);
-            
-            // 动态更新配置教程页面的提供商信息
             updateTutorialProviderConfigs(providerConfigs);
-            
-            // 动态更新用量查询页面的提供商信息
             updateUsageProviderConfigs(providerConfigs);
-            
-            // 动态更新配置管理页面的提供商选择标签
             updateConfigProviderConfigs(providerConfigs);
+            updateProviderFilterOptions(providerConfigs);
+            renderRoutingExamples(providerConfigs);
             
             isStaticProviderConfigsUpdated = true;
         }
@@ -265,6 +267,10 @@ function renderProviders(providers, supportedProviders = []) {
     let totalAccounts = 0;
     let totalHealthy = 0;
     
+    // 获取搜索关键词
+    const searchInput = document.getElementById('providerSearchInput');
+    const searchTerm = searchInput ? searchInput.value.toLowerCase().trim() : '';
+
     // 按照排序后的提供商类型渲染
     sortedProviderTypes.forEach((providerType) => {
         // 如果配置中明确设置为不显示，则跳过
@@ -273,6 +279,22 @@ function renderProviders(providers, supportedProviders = []) {
         }
 
         const accounts = hasProviders ? providers[providerType] || [] : [];
+
+        // 搜索过滤逻辑
+        if (searchTerm) {
+            const displayName = (configMap[providerType]?.name || providerType).toLowerCase();
+            const matchesType = displayName.includes(searchTerm) || providerType.toLowerCase().includes(searchTerm);
+            const matchesNodes = accounts.some(acc => 
+                (acc.customName || '').toLowerCase().includes(searchTerm) || 
+                (acc.uuid || '').toLowerCase().includes(searchTerm) ||
+                (acc.model || '').toLowerCase().includes(searchTerm)
+            );
+            
+            if (!matchesType && !matchesNodes) {
+                return;
+            }
+        }
+
         const providerDiv = document.createElement('div');
         providerDiv.className = 'provider-item';
         providerDiv.dataset.providerType = providerType;
@@ -319,6 +341,7 @@ function renderProviders(providers, supportedProviders = []) {
                     <span class="provider-type-text">${displayName}</span>
                 </div>
                 <div class="provider-header-right">
+                    ${generateAddGroupButton(providerType)}
                     ${generateAuthButton(providerType)}
                     <div class="provider-status ${statusClass}">
                         <i class="fas fa-${statusIcon}"></i>
@@ -359,6 +382,60 @@ function renderProviders(providers, supportedProviders = []) {
 
         container.appendChild(providerDiv);
         
+        // 为添加分组按钮添加事件监听
+        const addGroupBtn = providerDiv.querySelector('.add-group-btn');
+        if (addGroupBtn) {
+            addGroupBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                
+                // 使用自定义的主题风格 Prompt
+                showSimplePrompt(
+                    t('providers.addGroup.title'),
+                    t('providers.addGroup.suffixPlaceholder'),
+                    async (suffix) => {
+                        const cleanSuffix = suffix.toLowerCase().replace(/[^a-z0-9]/g, '');
+                        if (!cleanSuffix) {
+                            showToast(t('common.warning'), t('common.invalidSuffix'), 'warning');
+                            return;
+                        }
+                        
+                        const newProviderType = `${providerType}-${cleanSuffix}`;
+                        
+                        // 显示加载状态
+                        addGroupBtn.disabled = true;
+                        const originalHtml = addGroupBtn.innerHTML;
+                        addGroupBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+                        
+                        try {
+                            const response = await window.apiClient.post('/providers', {
+                                providerType: newProviderType,
+                                providerConfig: {
+                                    customName: cleanSuffix.toUpperCase(),
+                                    isHealthy: true,
+                                    isDisabled: false,
+                                    usageCount: 0,
+                                    errorCount: 0
+                                }
+                            });
+                            
+                            if (response.success) {
+                                showToast(t('common.success'), t('providers.addGroup.success'), 'success');
+                                await loadProviders(true);
+                                setTimeout(() => openProviderManager(newProviderType), 500);
+                            } else {
+                                throw new Error(response.error?.message || 'Unknown error');
+                            }
+                        } catch (error) {
+                            console.error('Failed to add provider group:', error);
+                            showToast(t('common.error'), t('providers.addGroup.error') + ': ' + error.message, 'error');
+                            addGroupBtn.disabled = false;
+                            addGroupBtn.innerHTML = originalHtml;
+                        }
+                    }
+                );
+            });
+        }
+
         // 为授权按钮添加事件监听
         const authBtn = providerDiv.querySelector('.generate-auth-btn');
         if (authBtn) {
@@ -372,6 +449,134 @@ function renderProviders(providers, supportedProviders = []) {
     // 更新统计卡片数据
     const activeProviders = hasProviders ? Object.keys(providers).length : 0;
     updateProviderStatsDisplay(activeProviders, totalHealthy, totalAccounts);
+
+    // 渲染仪表盘提供商状态概览
+    renderProviderStatusOverview(providers, configMap, sortedProviderTypes);
+}
+
+/**
+ * 跳转到特定的提供商节点
+ * @param {string} type - 提供商类型
+ * @param {string} uuid - 节点UUID
+ * @param {Event} event - 事件对象
+ */
+window.jumpToProviderNode = function(type, uuid, event) {
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    
+    // 切换到提供商页面
+    const providersNav = document.querySelector('[data-section="providers"]');
+    if (providersNav) {
+        providersNav.click();
+        // 延迟执行以确保页面切换完成
+        setTimeout(() => {
+            openProviderManager(type, uuid);
+        }, 100);
+    }
+};
+
+/**
+ * 渲染仪表盘提供商状态概览
+ * @param {Object} providers - 提供商数据
+ * @param {Object} configMap - 提供商配置映射
+ * @param {Array} sortedProviderTypes - 排序后的提供商类型
+ */
+function renderProviderStatusOverview(providers, configMap, sortedProviderTypes) {
+    const grid = document.getElementById('providerStatusGrid');
+    const panel = document.querySelector('.provider-status-panel');
+    if (!grid || !panel) return;
+
+    // 检查是否有任何实际可显示的提供商节点
+    let hasVisibleNodes = false;
+    const validProviderTypes = [];
+
+    sortedProviderTypes.forEach(type => {
+        const accounts = providers[type] || [];
+        if (accounts.length > 0) {
+            hasVisibleNodes = true;
+            validProviderTypes.push(type);
+        }
+    });
+
+    if (!hasVisibleNodes) {
+        panel.style.display = 'none';
+        
+        // 没有数据时，自动展开仪表盘的高级信息（路径路由示例等）
+        const dashboardDetails = document.querySelector('.dashboard-details');
+        if (dashboardDetails) {
+            dashboardDetails.open = true;
+        }
+        return;
+    }
+
+    panel.style.display = 'block';
+    grid.innerHTML = '';
+
+    validProviderTypes.forEach(type => {
+        const accounts = providers[type];
+        const displayName = configMap[type]?.name || type;
+        const card = document.createElement('div');
+        card.className = 'provider-status-card';
+        card.style.cursor = 'pointer';
+        card.addEventListener('click', () => {
+            // 点击跳转到提供商管理页面并打开对应类型的管理弹窗
+            const providersNav = document.querySelector('[data-section="providers"]');
+            if (providersNav) {
+                providersNav.click();
+                setTimeout(() => openProviderManager(type), 100);
+            }
+        });
+
+        const healthyCount = accounts.filter(acc => acc.isHealthy && !acc.isDisabled).length;
+        const totalCount = accounts.length;
+        const disabledCount = accounts.filter(acc => acc.isDisabled).length;
+        const unhealthyCount = totalCount - healthyCount - disabledCount;
+
+        const totalUsage = accounts.reduce((sum, acc) => sum + (acc.usageCount || 0), 0);
+        const totalErrors = accounts.reduce((sum, acc) => sum + (acc.errorCount || 0), 0);
+
+        card.innerHTML = `
+            <div class="provider-info">
+                <span class="provider-name" title="${displayName}">${displayName}</span>
+                <span class="provider-count" style="font-size: 0.75rem; color: var(--text-secondary);">${healthyCount}/${totalCount}</span>
+            </div>
+            
+            <div class="provider-nodes-summary">
+                <span style="color: #10b981;"><i class="fas fa-check"></i> ${healthyCount}</span>
+                <span style="color: #ef4444; ${unhealthyCount === 0 ? 'opacity: 0.3;' : ''}"><i class="fas fa-times"></i> ${unhealthyCount}</span>
+                <span style="color: #9ca3af; ${disabledCount === 0 ? 'opacity: 0.3;' : ''}"><i class="fas fa-minus-circle"></i> ${disabledCount}</span>
+            </div>
+
+            <div class="node-dots">
+                ${accounts.map(acc => {
+                    let statusClass = 'healthy';
+                    let statusTitle = acc.customName || acc.uuid;
+                    if (acc.isDisabled) {
+                        statusClass = 'disabled';
+                        statusTitle += ` (${t('modal.provider.status.disabled')})`;
+                    } else if (!acc.isHealthy) {
+                        statusClass = 'unhealthy';
+                        statusTitle += ` (${t('modal.provider.status.unhealthy')})`;
+                    } else {
+                        statusTitle += ` (${t('modal.provider.status.healthy')})`;
+                    }
+                    // 增加提示信息：用量和错误
+                    statusTitle += `\n${t('providers.stat.usageCount')}: ${acc.usageCount || 0}\n${t('providers.stat.errorCount')}: ${acc.errorCount || 0}`;
+                    
+                    // 为圆点创建 HTML 字符串，添加点击跳转事件
+                    return `<span class="node-dot ${statusClass}" title="${statusTitle}" onclick="window.jumpToProviderNode('${type}', '${acc.uuid}', event)"></span>`;
+                }).join('')}
+            </div>
+            <div class="provider-stats-summary">
+                <span><i class="fas fa-paper-plane" style="font-size: 0.7rem; opacity: 0.7;"></i> ${totalUsage}</span>
+                <span><i class="fas fa-exclamation-circle" style="font-size: 0.7rem; opacity: 0.7;"></i> ${totalErrors}</span>
+                <span class="success-rate">${totalUsage > 0 ? ((totalUsage - totalErrors) / totalUsage * 100).toFixed(1) + '%' : '--'}</span>
+            </div>
+        `;
+        grid.appendChild(card);
+    });
 }
 
 /**
@@ -444,11 +649,16 @@ function updateProviderStatsDisplay(activeProviders, healthyProviders, totalAcco
  * 打开提供商管理模态框
  * @param {string} providerType - 提供商类型
  */
-async function openProviderManager(providerType) {
+/**
+ * 打开提供商管理模态框
+ * @param {string} providerType - 提供商类型
+ * @param {string} searchTerm - 初始搜索词
+ */
+async function openProviderManager(providerType, searchTerm = '') {
     try {
         const data = await window.apiClient.get(`/providers/${encodeURIComponent(providerType)}`);
         
-        showProviderManagerModal(data);
+        showProviderManagerModal(data, searchTerm);
     } catch (error) {
         console.error('Failed to load provider details:', error);
         showToast(t('common.error'), t('modal.provider.load.failed'), 'error');
@@ -482,6 +692,72 @@ function generateAuthButton(providerType) {
         <button class="generate-auth-btn" title="生成OAuth授权链接">
             <i class="fas fa-key"></i>
             <span data-i18n="providers.auth.generate">${t('providers.auth.generate')}</span>
+        </button>
+    `;
+}
+
+/**
+ * 显示一个极简的主题风格输入框
+ * @param {string} title - 标题
+ * @param {string} placeholder - 占位符
+ * @param {function} callback - 确认回调
+ */
+function showSimplePrompt(title, placeholder, callback) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.display = 'flex';
+    overlay.style.zIndex = '3000';
+
+    overlay.innerHTML = `
+        <div class="modal-content" style="max-width: 320px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); border: 1px solid var(--border-color); padding: 20px;">
+            <div style="margin-bottom: 12px; font-weight: 600; font-size: 14px; color: var(--text-primary);">${title}</div>
+            <div style="display: flex; gap: 8px;">
+                <input type="text" id="simple-prompt-input" placeholder="${placeholder}" style="flex: 1; padding: 8px 12px; border: 1.5px solid var(--border-color); border-radius: 6px; font-size: 13px; outline: none;">
+                <button id="simple-prompt-submit" class="btn btn-primary btn-sm" style="padding: 0 12px; height: 34px; border-radius: 6px; font-size: 13px;">${t('common.confirm')}</button>
+            </div>
+        </div>
+    `;
+    
+    document.body.appendChild(overlay);
+    
+    const input = overlay.querySelector('#simple-prompt-input');
+    const submitBtn = overlay.querySelector('#simple-prompt-submit');
+    
+    input.focus();
+    
+    const finish = () => {
+        const val = input.value.trim();
+        if (val) {
+            overlay.remove();
+            callback(val);
+        }
+    };
+    
+    submitBtn.onclick = finish;
+    input.onkeydown = (e) => {
+        if (e.key === 'Enter') finish();
+        if (e.key === 'Escape') overlay.remove();
+    };
+    overlay.onclick = (e) => {
+        if (e.target === overlay) overlay.remove();
+    };
+}
+
+/**
+ * 生成添加分组按钮HTML
+ * @param {string} providerType - 提供商类型
+ * @returns {string} 按钮HTML
+ */
+function generateAddGroupButton(providerType) {
+    const allowedTypes = ['claude-custom', 'openai-custom', 'openaiResponses-custom'];
+    if (!allowedTypes.includes(providerType)) {
+        return '';
+    }
+
+    return `
+        <button class="add-group-btn" title="${t('providers.addGroup.title')}">
+            <i class="fas fa-folder-plus"></i>
+            <span data-i18n="providers.addGroup">${t('providers.addGroup')}</span>
         </button>
     `;
 }
@@ -2983,6 +3259,8 @@ async function checkUpdate(silent = false) {
     const updateBtn = document.getElementById('performUpdateBtn');
     const updateBadge = document.getElementById('updateBadge');
     const latestVersionText = document.getElementById('latestVersionText');
+    const versionSelectWrapper = document.getElementById('versionSelectWrapper');
+    const versionSelect = document.getElementById('versionSelect');
     const checkBtnIcon = checkBtn?.querySelector('i');
     const checkBtnText = checkBtn?.querySelector('span');
 
@@ -2995,16 +3273,46 @@ async function checkUpdate(silent = false) {
 
         const data = await window.apiClient.get('/check-update');
 
+        // 处理版本列表
+        if (versionSelect && data.availableVersions && data.availableVersions.length > 0) {
+            versionSelect.innerHTML = '';
+            data.availableVersions.forEach(version => {
+                const option = document.createElement('option');
+                option.value = version;
+                option.textContent = version;
+                // 如果是最新版本，增加标识
+                if (version === data.latestVersion) {
+                    option.textContent += ` (${t('dashboard.update.latest') || 'Latest'})`;
+                }
+                // 如果是当前版本，增加标识
+                if (version === data.localVersion || version === `v${data.localVersion}`) {
+                    option.textContent += ` (${t('dashboard.update.current') || 'Current'})`;
+                    option.selected = true;
+                }
+                versionSelect.appendChild(option);
+            });
+            
+            if (versionSelectWrapper) versionSelectWrapper.style.display = 'block';
+            if (updateBtn) {
+                updateBtn.style.display = 'inline-flex';
+                // 如果是回退，修改按钮文字
+                updateBtn.querySelector('span').textContent = t('dashboard.update.perform');
+            }
+        }
+
         if (data.hasUpdate) {
-            if (updateBtn) updateBtn.style.display = 'inline-flex';
             if (updateBadge) updateBadge.style.display = 'inline-flex';
             if (latestVersionText) latestVersionText.textContent = data.latestVersion;
             
+            // 如果有新版本且未选择特定版本，默认选中最新
+            if (versionSelect && data.latestVersion) {
+                versionSelect.value = data.latestVersion;
+            }
+
             if (!silent) {
                 showToast(t('common.info'), t('dashboard.update.hasUpdate', { version: data.latestVersion }), 'info');
             }
         } else {
-            if (updateBtn) updateBtn.style.display = 'none';
             if (updateBadge) updateBadge.style.display = 'none';
             if (!silent) {
                 showToast(t('common.info'), t('dashboard.update.upToDate'), 'success');
@@ -3029,10 +3337,10 @@ async function checkUpdate(silent = false) {
  */
 async function performUpdate() {
     const updateBtn = document.getElementById('performUpdateBtn');
-    const latestVersionText = document.getElementById('latestVersionText');
-    const version = latestVersionText?.textContent || '';
+    const versionSelect = document.getElementById('versionSelect');
+    const selectedVersion = versionSelect?.value || '';
 
-    if (!confirm(t('dashboard.update.confirmMsg', { version }))) {
+    if (!confirm(t('dashboard.update.confirmMsg', { version: selectedVersion }))) {
         return;
     }
 
@@ -3048,7 +3356,7 @@ async function performUpdate() {
 
         showToast(t('common.info'), t('dashboard.update.updating'), 'info');
 
-        const data = await window.apiClient.post('/update');
+        const data = await window.apiClient.post('/update', { version: selectedVersion });
 
         if (data.success) {
             if (data.updated) {
@@ -3058,8 +3366,8 @@ async function performUpdate() {
                 // 自动重启服务
                 await restartServiceAfterUpdate();
             } else {
-                // 已是最新版本
-                showToast(t('common.info'), t('dashboard.update.upToDate'), 'info');
+                // 已是目标版本
+                showToast(t('common.info'), data.message || t('dashboard.update.upToDate'), 'info');
             }
         }
     } catch (error) {
@@ -3121,16 +3429,148 @@ async function restartServiceAfterUpdate() {
     }
 }
 
+/**
+ * 显示添加提供商组模态框
+ * @param {string} defaultBaseType - 默认的基础类型
+ */
+function showAddProviderGroupModal(defaultBaseType = null) {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.style.display = 'flex';
+    modal.style.zIndex = '2000';
+    
+    // 获取所有基础母版配置，并过滤掉当前已经存在的“自定义组”
+    // 确保下拉菜单只显示纯净的基础类型（如 openai-custom），而不显示已有的带后缀组
+    const allBaseConfigs = getBaseProviderConfigs();
+    const baseTypes = allBaseConfigs.filter(config => {
+        // 1. 必须在后端支持的列表中
+        const isSupported = cachedSupportedProviders.includes(config.id);
+        
+        // 2. 限制只能添加特定类型的配置组 (Claude Custom, OpenAI Custom, OpenAI Responses)
+        const allowedTypes = ['claude-custom', 'openai-custom', 'openaiResponses-custom'];
+        const isAllowed = allowedTypes.includes(config.id);
+        
+        return isSupported && isAllowed;
+    });
+
+    let optionsHtml = baseTypes.map(type => {
+        const selected = (defaultBaseType && type.id === defaultBaseType) ? 'selected' : '';
+        return `<option value="${type.id}" ${selected}>${type.name}</option>`;
+    }).join('');
+
+    const selectedConfig = allBaseConfigs.find(c => c.id === defaultBaseType);
+    const baseTypeSectionHtml = defaultBaseType ? `
+        <div class="form-group" style="margin-bottom: 15px;">
+            <label style="display: block; margin-bottom: 5px; font-weight: 600;" data-i18n="providers.addGroup.baseType">${t('providers.addGroup.baseType')}</label>
+            <div style="padding: 10px 12px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; display: flex; align-items: center; gap: 8px;">
+                <i class="fas ${selectedConfig?.icon || 'fa-robot'}" style="color: #6b7280;"></i>
+                <span style="font-weight: 500; color: #374151;">${selectedConfig?.name || defaultBaseType}</span>
+            </div>
+            <input type="hidden" id="groupBaseType" value="${defaultBaseType}">
+        </div>
+    ` : `
+        <div class="form-group" style="margin-bottom: 15px;">
+            <label style="display: block; margin-bottom: 5px; font-weight: 600;" data-i18n="providers.addGroup.baseType">${t('providers.addGroup.baseType')}</label>
+            <select id="groupBaseType" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                ${optionsHtml}
+            </select>
+        </div>
+    `;
+
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 450px;">
+            <div class="modal-header">
+                <h3><i class="fas fa-folder-plus"></i> <span data-i18n="providers.addGroup.title">${t('providers.addGroup.title')}</span></h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                ${baseTypeSectionHtml}
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 5px; font-weight: 600;" data-i18n="providers.addGroup.suffix">${t('providers.addGroup.suffix')}</label>
+                    <input type="text" id="groupSuffix" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;" 
+                           placeholder="${t('providers.addGroup.suffixPlaceholder')}" data-i18n-placeholder="providers.addGroup.suffixPlaceholder">
+                    <small style="color: #666; font-size: 12px; margin-top: 5px; display: block;">
+                        示例: ${selectedConfig?.id || 'openai-custom'} + prod -> ${selectedConfig?.id || 'openai-custom'}-prod
+                    </small>
+                </div>
+            </div>
+            <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
+                <button class="btn btn-secondary modal-cancel" data-i18n="modal.provider.cancel">${t('modal.provider.cancel')}</button>
+                <button class="btn btn-primary modal-submit">
+                    <i class="fas fa-check"></i> <span data-i18n="common.confirm">${t('common.confirm')}</span>
+                </button>
+            </div>
+        </div>
+    `;
+    
+    document.body.appendChild(modal);
+    
+    const closeBtn = modal.querySelector('.modal-close');
+    const cancelBtn = modal.querySelector('.modal-cancel');
+    const submitBtn = modal.querySelector('.modal-submit');
+    const suffixInput = modal.querySelector('#groupSuffix');
+    const baseTypeSelect = modal.querySelector('#groupBaseType');
+
+    const closeModal = () => modal.remove();
+    
+    [closeBtn, cancelBtn].forEach(btn => btn.addEventListener('click', closeModal));
+    
+    submitBtn.addEventListener('click', async () => {
+        const baseType = baseTypeSelect.value;
+        const suffix = suffixInput.value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        
+        if (!suffix) {
+            showToast(t('common.warning'), t('common.invalidSuffix'), 'warning');
+            return;
+        }
+        
+        const newProviderType = `${baseType}-${suffix}`;
+        
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+        
+        try {
+            // 创建一个带后缀的新提供商组，并添加一个初始的空配置（或者让用户在随后的模态框中添加）
+            // 这里我们先创建一个临时的空配置，这样组就会在 dashboard 中显示出来
+            const response = await window.apiClient.post('/providers', {
+                providerType: newProviderType,
+                providerConfig: {
+                    customName: suffix.toUpperCase(),
+                    isHealthy: true,
+                    isDisabled: false,
+                    usageCount: 0,
+                    errorCount: 0
+                }
+            });
+            
+            if (response.success) {
+                showToast(t('common.success'), t('providers.addGroup.success'), 'success');
+                closeModal();
+                // 重新加载提供商列表，强制刷新支持的类型
+                await loadProviders(true);
+                // 自动打开新创建的组的管理界面
+                setTimeout(() => openProviderManager(newProviderType), 500);
+            } else {
+                throw new Error(response.error?.message || 'Unknown error');
+            }
+        } catch (error) {
+            console.error('Failed to add provider group:', error);
+            showToast(t('common.error'), t('providers.addGroup.error') + ': ' + error.message, 'error');
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = `<i class="fas fa-check"></i> <span>${t('common.confirm')}</span>`;
+        }
+    });
+}
+
 export {
     loadSystemInfo,
     updateTimeDisplay,
     loadProviders,
-    renderProviders,
-    updateProviderStatsDisplay,
     openProviderManager,
     showAuthModal,
     executeGenerateAuthUrl,
     handleGenerateAuthUrl,
     checkUpdate,
-    performUpdate
+    performUpdate,
+    showAddProviderGroupModal
 };
