@@ -2,6 +2,7 @@ import { promises as fs } from 'fs';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import logger from '../../utils/logger.js';
+import { RateManager } from '../../utils/rate-tracker.js';
 
 const STATS_STORE_FILE = path.join(process.cwd(), 'configs', 'model-usage-stats.json');
 const DEFAULT_CONFIG = {
@@ -17,6 +18,7 @@ let currentPersistInterval = DEFAULT_CONFIG.persistInterval;
 let mutationVersion = 0;
 let persistPromise = null;
 
+const rateManager = new RateManager(60); // 使用 60 秒滑动窗口，更平滑
 const pendingRequests = new Map();
 
 function getTraceRequestId(requestId) {
@@ -234,6 +236,16 @@ function normalizeUsageCandidate(candidate) {
     if (!candidate || typeof candidate !== 'object') {
         return null;
     }
+    if (Array.isArray(candidate)) {
+        const usage = candidate.reduce((merged, item) => mergeUsage(merged, normalizeUsageCandidate(item)), {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            cachedTokens: 0
+        });
+        const hasUsage = usage.promptTokens > 0 || usage.completionTokens > 0 || usage.totalTokens > 0 || usage.cachedTokens > 0;
+        return hasUsage ? usage : null;
+    }
 
     const usage = candidate.usage || candidate.message?.usage || candidate.usageMetadata || candidate.response?.usage || null;
     const reasoningTokens = toNumber(
@@ -390,6 +402,14 @@ export async function finalizeRequest({ requestId, model, provider, fromProvider
     }
 
     const state = getPendingRequest(requestId, { model, provider, fromProvider, isStream });
+    
+    // 防重逻辑：如果该请求已经处理过速率统计，则直接删除并返回
+    if (state.rateRecorded) {
+        pendingRequests.delete(requestId);
+        return true;
+    }
+    state.rateRecorded = true;
+
     pendingRequests.delete(requestId);
 
     if (!state.hasResponse) {
@@ -400,6 +420,7 @@ export async function finalizeRequest({ requestId, model, provider, fromProvider
     const timestamp = new Date().toISOString();
     const normalizedProvider = state.provider || provider || 'unknown';
     const normalizedModel = state.model || model || 'unknown';
+    
     const usage = {
         promptTokens: state.usage.promptTokens,
         completionTokens: state.usage.completionTokens,
@@ -410,6 +431,10 @@ export async function finalizeRequest({ requestId, model, provider, fromProvider
     applyUsage(statsStore.summary, usage, timestamp);
     applyUsage(ensureProviderStore(normalizedProvider).summary, usage, timestamp);
     applyUsage(ensureModelStore(normalizedProvider, normalizedModel), usage, timestamp);
+
+    // 记录速率统计
+    rateManager.record(`provider:${normalizedProvider}`, usage.totalTokens);
+    rateManager.record(`model:${normalizedModel}`, usage.totalTokens);
 
     // 记录每日统计
     const dateKey = timestamp.split('T')[0];
@@ -426,13 +451,45 @@ export async function finalizeRequest({ requestId, model, provider, fromProvider
 
 export async function getStats() {
     ensureLoaded();
-    return JSON.parse(JSON.stringify(statsStore));
+    const stats = JSON.parse(JSON.stringify(statsStore));
+    
+    // 注入速率统计
+    const globalRates = rateManager.getGlobalStats();
+    stats.summary.qps = globalRates.qps;
+    stats.summary.tps = globalRates.tps;
+    stats.summary.rpm = globalRates.rpm;
+    stats.summary.maxQps = globalRates.maxQps;
+    stats.summary.maxTps = globalRates.maxTps;
+    stats.summary.maxRpm = globalRates.maxRpm;
+
+    for (const [provider, providerStore] of Object.entries(stats.providers || {})) {
+        const pRates = rateManager.getStats(`provider:${provider}`);
+        providerStore.summary.qps = pRates.qps;
+        providerStore.summary.tps = pRates.tps;
+        providerStore.summary.rpm = pRates.rpm;
+        providerStore.summary.maxQps = pRates.maxQps;
+        providerStore.summary.maxTps = pRates.maxTps;
+        providerStore.summary.maxRpm = pRates.maxRpm;
+
+        for (const [model, modelStore] of Object.entries(providerStore.models || {})) {
+            const mRates = rateManager.getStats(`model:${model}`);
+            modelStore.qps = mRates.qps;
+            modelStore.tps = mRates.tps;
+            modelStore.rpm = mRates.rpm;
+            modelStore.maxQps = mRates.maxQps;
+            modelStore.maxTps = mRates.maxTps;
+            modelStore.maxRpm = mRates.maxRpm;
+        }
+    }
+
+    return stats;
 }
 
 export async function resetStats() {
     ensureLoaded();
     statsStore = createDefaultStore();
     pendingRequests.clear();
+    rateManager.clear(); // 同时重置速率统计
     markDirty();
     await persistIfDirty();
     logger.warn('[Model Usage Stats] Stats store reset');
@@ -459,6 +516,7 @@ export async function resetTokenStats() {
     }
 
     pendingRequests.clear();
+    rateManager.clear(); // 同时重置速率统计
     markDirty();
     await persistIfDirty();
     logger.warn('[Model Usage Stats] Token stats reset');
